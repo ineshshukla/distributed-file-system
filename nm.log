@@ -1,0 +1,7 @@
+{"ts":"2025-11-03T21:43:04","level":"INFO","event":"nm_listen","msg":"host=127.0.0.1 port=5000"}
+{"ts":"2025-11-03T21:43:05","level":"INFO","event":"nm_ss_register","msg":"ip=127.0.0.1 user=ss1 files=3"}
+{"ts":"2025-11-03T21:43:05","level":"INFO","event":"nm_ss_file_list","msg":"user=ss1 list=test1.txt,test_storage.txt,test2.txt"}
+{"ts":"2025-11-03T21:43:05","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-03T21:43:07","level":"INFO","event":"nm_client_register","msg":"ip=127.0.0.1 user=alice"}
+{"ts":"2025-11-03T21:43:10","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-03T21:43:15","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
