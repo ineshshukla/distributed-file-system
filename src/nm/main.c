@@ -1,5 +1,6 @@
 // Name Server (NM): accepts connections from SS/Clients and handles
 // registration and heartbeats in Phase 1. Thread-per-connection model.
+#define _POSIX_C_SOURCE 200809L  // For strdup
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <signal.h>
@@ -11,6 +12,8 @@
 #include "../common/net.h"
 #include "../common/log.h"
 #include "../common/protocol.h"
+#include "index.h"
+#include "access_control.h"
 
 // Argument passed to each connection handler thread.
 typedef struct ClientConnArg {
@@ -46,31 +49,63 @@ static void registry_add(const char *role, const char *username, const char *pay
 static void handle_message(int fd, const struct sockaddr_in *peer, const Message *msg) {
     char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &peer->sin_addr, ip, sizeof(ip));
     if (strcmp(msg->type, "SS_REGISTER") == 0) {
-        // Phase 2: Parse file list from SS registration payload
+        // Step 3: Parse SS registration payload and index files
         // Payload format: "host=IP,client_port=PORT,storage=DIR,files=file1.txt,file2.txt,..."
-        // Extract file list for logging (full indexing will be in Step 3)
+        
+        // Extract SS information from payload
+        char ss_host[64] = {0};
+        int ss_client_port = 0;
+        char *host_start = strstr(msg->payload, "host=");
+        char *port_start = strstr(msg->payload, "client_port=");
+        
+        if (host_start) {
+            char *host_end = strchr(host_start + 5, ',');
+            if (host_end) {
+                size_t host_len = host_end - (host_start + 5);
+                if (host_len < sizeof(ss_host)) {
+                    memcpy(ss_host, host_start + 5, host_len);
+                    ss_host[host_len] = '\0';
+                }
+            }
+        }
+        
+        if (port_start) {
+            ss_client_port = atoi(port_start + 12);
+        }
+        
+        // Extract and parse file list
         char *files_start = strstr(msg->payload, "files=");
         int file_count = 0;
+        
         if (files_start) {
             files_start += 6;  // Skip "files="
             if (*files_start != '\0') {
-                // Count files (comma-separated)
-                char *p = files_start;
-                file_count = 1;  // At least one file
-                while (*p) {
-                    if (*p == ',') file_count++;
-                    p++;
+                // Parse comma-separated file list and index each file
+                char *file_list = strdup(files_start);  // Make copy for parsing
+                if (file_list) {
+                    char *saveptr = NULL;
+                    char *filename = strtok_r(file_list, ",", &saveptr);
+                    
+                    while (filename) {
+                        // Index this file (owner unknown at this point, will be set when file is accessed)
+                        // For existing files from SS, we use SS username as placeholder owner
+                        // Real owner will be loaded from metadata when file is accessed
+                        FileEntry *entry = index_add_file(filename, msg->username, ss_host, 
+                                                          ss_client_port, msg->username);
+                        if (entry) {
+                            file_count++;
+                            log_info("nm_file_indexed", "file=%s ss=%s", filename, msg->username);
+                        }
+                        filename = strtok_r(NULL, ",", &saveptr);
+                    }
+                    
+                    free(file_list);
                 }
             }
         }
         
         registry_add("SS", msg->username, msg->payload);
-        log_info("nm_ss_register", "ip=%s user=%s files=%d", ip, msg->username, file_count);
-        
-        // Phase 2: Log file list for verification
-        if (files_start && *files_start != '\0') {
-            log_info("nm_ss_file_list", "user=%s list=%s", msg->username, files_start);
-        }
+        log_info("nm_ss_register", "ip=%s user=%s files=%d indexed", ip, msg->username, file_count);
         
         Message ack = {0};
         (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
@@ -136,6 +171,11 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--host") && i+1 < argc) host = argv[++i];
         else if (!strcmp(argv[i], "--port") && i+1 < argc) port = atoi(argv[++i]);
     }
+    
+    // Step 3: Initialize file index and LRU cache
+    index_init();
+    log_info("nm_index_init", "File index initialized");
+    
     signal(SIGINT, on_sigint);
     int server_fd = create_server_socket(host, port);
     if (server_fd < 0) { perror("NM listen"); return 1; }

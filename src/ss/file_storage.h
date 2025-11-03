@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <time.h>
+#include "../common/acl.h"
 
 // File storage module for Storage Server
 // Handles all file operations: create, read, delete, metadata management
@@ -26,7 +27,7 @@ typedef struct {
     size_t size_bytes;        // File size in bytes
     int word_count;           // Total word count (for INFO command)
     int char_count;           // Total character count (for INFO command)
-    // Note: ACL will be added in later phase (Step 4)
+    ACL acl;                  // Access Control List (Step 4)
 } FileMetadata;
 
 // Create an empty file in the storage directory

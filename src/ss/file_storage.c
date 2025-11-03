@@ -58,6 +58,9 @@ int file_create(const char *storage_dir, const char *filename, const char *owner
     meta.word_count = 0;
     meta.char_count = 0;
     
+    // Initialize ACL with owner (Step 4)
+    meta.acl = acl_init(owner);
+    
     // Save metadata
     if (metadata_save(storage_dir, filename, &meta) != 0) {
         // Failed to save metadata - clean up file
@@ -153,15 +156,29 @@ int metadata_load(const char *storage_dir, const char *filename, FileMetadata *m
     // Initialize metadata structure
     memset(metadata, 0, sizeof(FileMetadata));
     
-    // Read metadata line by line
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        // Remove newline
-        size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') {
-            line[len-1] = '\0';
-        }
-        
+    // Read entire file into buffer for ACL parsing
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    
+    char *file_content = (char *)malloc(file_size + 1);
+    if (!file_content) {
+        fclose(fp);
+        return -1;
+    }
+    size_t read_bytes = fread(file_content, 1, file_size, fp);
+    if (read_bytes != (size_t)file_size && !feof(fp)) {
+        free(file_content);
+        fclose(fp);
+        return -1;
+    }
+    file_content[read_bytes] = '\0';
+    fclose(fp);
+    
+    // Parse line by line
+    char *saveptr = NULL;
+    char *line = strtok_r(file_content, "\n", &saveptr);
+    while (line) {
         // Parse key=value pairs
         if (strncmp(line, "owner=", 6) == 0) {
             // Copy owner, truncating if too long (owner field is 64 bytes)
@@ -184,10 +201,40 @@ int metadata_load(const char *storage_dir, const char *filename, FileMetadata *m
             metadata->word_count = atoi(line + 11);
         } else if (strncmp(line, "char_count=", 11) == 0) {
             metadata->char_count = atoi(line + 11);
+        } else if (strncmp(line, "ACL_START", 9) == 0) {
+            // ACL section starts - collect all ACL lines
+            char acl_buf[4096] = {0};
+            size_t acl_pos = 0;
+            
+            // Collect ACL lines until ACL_END
+            while ((line = strtok_r(NULL, "\n", &saveptr))) {
+                if (strncmp(line, "ACL_END", 7) == 0) {
+                    break;
+                }
+                // Append line to ACL buffer
+                size_t line_len = strlen(line);
+                if (acl_pos + line_len + 1 < sizeof(acl_buf)) {
+                    memcpy(acl_buf + acl_pos, line, line_len);
+                    acl_pos += line_len;
+                    acl_buf[acl_pos++] = '\n';
+                }
+            }
+            acl_buf[acl_pos] = '\0';
+            
+            // Deserialize ACL
+            acl_deserialize(&metadata->acl, acl_buf);
+            break;  // ACL is last section
         }
+        line = strtok_r(NULL, "\n", &saveptr);
     }
     
-    fclose(fp);
+    free(file_content);
+    
+    // If ACL not found, initialize with owner
+    if (metadata->acl.count == 0 && strlen(metadata->owner) > 0) {
+        metadata->acl = acl_init(metadata->owner);
+    }
+    
     return 0;  // Success
 }
 
@@ -227,6 +274,14 @@ int metadata_save(const char *storage_dir, const char *filename, const FileMetad
     fprintf(fp, "size_bytes=%zu\n", metadata->size_bytes);
     fprintf(fp, "word_count=%d\n", metadata->word_count);
     fprintf(fp, "char_count=%d\n", metadata->char_count);
+    
+    // Write ACL (Step 4)
+    fprintf(fp, "ACL_START\n");
+    char acl_buf[4096];
+    if (acl_serialize(&metadata->acl, acl_buf, sizeof(acl_buf)) == 0) {
+        fprintf(fp, "%s", acl_buf);
+    }
+    fprintf(fp, "ACL_END\n");
     
     fclose(fp);
     
