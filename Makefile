@@ -3,8 +3,9 @@ CFLAGS=-O2 -Wall -Wextra -Werror -pthread -std=c11
 
 SRC_COMMON=src/common/net.c src/common/log.c src/common/protocol.c src/common/errors.c src/common/acl.c
 SRC_SS=src/ss/file_scan.c src/ss/file_storage.c
-SRC_NM=src/nm/index.c src/nm/access_control.c
-INC_COMMON=-Isrc/common -Isrc/ss -Isrc/nm
+SRC_NM=src/nm/index.c src/nm/access_control.c src/nm/commands.c src/nm/registry.c
+SRC_CLIENT=src/client/commands.c
+INC_COMMON=-Isrc/common -Isrc/ss -Isrc/nm -Isrc/client
 
 all: nm ss client
 
@@ -14,8 +15,8 @@ nm: $(SRC_COMMON) $(SRC_NM) src/nm/main.c
 ss: $(SRC_COMMON) $(SRC_SS) src/ss/main.c
 	$(CC) $(CFLAGS) $(INC_COMMON) -o bin_ss src/ss/main.c $(SRC_COMMON) $(SRC_SS)
 
-client: $(SRC_COMMON) src/client/main.c
-	$(CC) $(CFLAGS) $(INC_COMMON) -o bin_client src/client/main.c $(SRC_COMMON)
+client: $(SRC_COMMON) $(SRC_CLIENT) src/client/main.c
+	$(CC) $(CFLAGS) $(INC_COMMON) -o bin_client src/client/main.c $(SRC_COMMON) $(SRC_CLIENT)
 
 clean:
 	rm -f bin_nm bin_ss bin_client

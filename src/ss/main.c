@@ -126,11 +126,107 @@ int main(int argc, char **argv) {
     // Wait for ACK from NM
     char rbuf[MAX_LINE]; recv_line(ctx.nm_fd, rbuf, sizeof(rbuf));
     log_info("ss_registered", "payload=%s", payload);
+    
     // Start heartbeat thread
-    pthread_t th; (void)pthread_create(&th, NULL, hb_thread, &ctx);
-    // Keep connection open; Phase 1 has no further commands
-    while (1) { sleep(60); }
-    ctx.running = 0; pthread_join(th, NULL); close(ctx.nm_fd);
+    pthread_t hb_th; (void)pthread_create(&hb_th, NULL, hb_thread, &ctx);
+    
+    // Step 6: Command processing loop
+    // Listen for commands from NM (CREATE, DELETE, etc.)
+    log_info("ss_ready", "Ready to receive commands from NM");
+    
+    while (ctx.running) {
+        char cmd_line[MAX_LINE];
+        int n = recv_line(ctx.nm_fd, cmd_line, sizeof(cmd_line));
+        if (n <= 0) {
+            // Connection closed
+            log_error("ss_nm_disconnected", "Lost connection to NM");
+            break;
+        }
+        
+        // Parse command message
+        Message cmd_msg;
+        if (proto_parse_line(cmd_line, &cmd_msg) != 0) {
+            log_error("ss_parse_error", "Failed to parse command");
+            continue;
+        }
+        
+        // Handle CREATE command
+        if (strcmp(cmd_msg.type, "CREATE") == 0) {
+            const char *filename = cmd_msg.payload;
+            const char *owner = cmd_msg.username;
+            
+            log_info("ss_cmd_create", "file=%s owner=%s", filename, owner);
+            
+            // Create file
+            if (file_create(ctx.storage_dir, filename, owner) == 0) {
+                // Send ACK
+                Message ack = {0};
+                (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "created");
+                
+                char ack_line[MAX_LINE];
+                proto_format_line(&ack, ack_line, sizeof(ack_line));
+                send_all(ctx.nm_fd, ack_line, strlen(ack_line));
+                
+                log_info("ss_file_created", "file=%s", filename);
+            } else {
+                // Send error (file already exists or other error)
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "CONFLICT", "File already exists or creation failed",
+                                  error_buf, sizeof(error_buf));
+                send_all(ctx.nm_fd, error_buf, strlen(error_buf));
+                log_error("ss_create_failed", "file=%s", filename);
+            }
+        }
+        // Handle DELETE command
+        else if (strcmp(cmd_msg.type, "DELETE") == 0) {
+            const char *filename = cmd_msg.payload;
+            
+            log_info("ss_cmd_delete", "file=%s", filename);
+            
+            // Delete file
+            if (file_delete(ctx.storage_dir, filename) == 0) {
+                // Send ACK
+                Message ack = {0};
+                (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "deleted");
+                
+                char ack_line[MAX_LINE];
+                proto_format_line(&ack, ack_line, sizeof(ack_line));
+                send_all(ctx.nm_fd, ack_line, strlen(ack_line));
+                
+                log_info("ss_file_deleted", "file=%s", filename);
+            } else {
+                // Send error (file not found or other error)
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "NOT_FOUND", "File not found or deletion failed",
+                                  error_buf, sizeof(error_buf));
+                send_all(ctx.nm_fd, error_buf, strlen(error_buf));
+                log_error("ss_delete_failed", "file=%s", filename);
+            }
+        }
+        // Unknown command
+        else {
+            log_error("ss_unknown_cmd", "type=%s", cmd_msg.type);
+            char error_buf[MAX_LINE];
+            proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                              "INVALID", "Unknown command",
+                              error_buf, sizeof(error_buf));
+            send_all(ctx.nm_fd, error_buf, strlen(error_buf));
+        }
+    }
+    
+    ctx.running = 0;
+    pthread_join(hb_th, NULL);
+    close(ctx.nm_fd);
     return 0;
 }
 

@@ -14,6 +14,8 @@
 #include "../common/protocol.h"
 #include "index.h"
 #include "access_control.h"
+#include "commands.h"
+#include "registry.h"
 
 // Argument passed to each connection handler thread.
 typedef struct ClientConnArg {
@@ -21,29 +23,7 @@ typedef struct ClientConnArg {
     struct sockaddr_in addr;
 } ClientConnArg;
 
-// Extremely simple in-memory registry for demo purposes.
-typedef struct RegistryEntry {
-    char role[16]; // SS or CLIENT
-    char username[64];
-    char payload[256]; // For SS: "nm_port,client_port,files..." simplified
-    struct RegistryEntry *next;
-} RegistryEntry;
-
-static RegistryEntry *g_registry_head = NULL;
-static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
 static volatile int g_running = 1;
-
-// Add an entry to the registry (not de-duplicated in Phase 1).
-static void registry_add(const char *role, const char *username, const char *payload) {
-    RegistryEntry *e = (RegistryEntry*)calloc(1, sizeof(RegistryEntry));
-    (void)snprintf(e->role, sizeof(e->role), "%s", role ? role : "");
-    (void)snprintf(e->username, sizeof(e->username), "%s", username ? username : "");
-    (void)snprintf(e->payload, sizeof(e->payload), "%s", payload ? payload : "");
-    pthread_mutex_lock(&g_registry_mu);
-    e->next = g_registry_head;
-    g_registry_head = e;
-    pthread_mutex_unlock(&g_registry_mu);
-}
 
 // Handle a single parsed message from a peer.
 static void handle_message(int fd, const struct sockaddr_in *peer, const Message *msg) {
@@ -142,8 +122,80 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         send_all(fd, line, strlen(line));
         return;
     }
-    // Unknown
+    
+    // Step 6: Handle client commands
+    // Parse payload: flags=FLAGS|arg1|arg2|...
+    if (strcmp(msg->type, "VIEW") == 0) {
+        // Extract flags from payload
+        char flags[16] = {0};
+        char *flags_start = strstr(msg->payload, "flags=");
+        if (flags_start) {
+            char *flags_end = strchr(flags_start + 6, '|');
+            if (flags_end) {
+                size_t flags_len = flags_end - (flags_start + 6);
+                if (flags_len < sizeof(flags)) {
+                    memcpy(flags, flags_start + 6, flags_len);
+                    flags[flags_len] = '\0';
+                }
+            } else {
+                strncpy(flags, flags_start + 6, sizeof(flags) - 1);
+            }
+        }
+        
+        log_info("nm_cmd_view", "user=%s flags=%s", msg->username, flags);
+        handle_view(fd, msg->username, flags);
+        return;
+    }
+    
+    if (strcmp(msg->type, "CREATE") == 0) {
+        // Filename is directly in payload
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+        
+        log_info("nm_cmd_create", "user=%s file=%s", msg->username, filename);
+        handle_create(fd, msg->username, filename);
+        return;
+    }
+    
+    if (strcmp(msg->type, "DELETE") == 0) {
+        // Filename is directly in payload
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+        
+        log_info("nm_cmd_delete", "user=%s file=%s", msg->username, filename);
+        handle_delete(fd, msg->username, filename);
+        return;
+    }
+    
+    if (strcmp(msg->type, "INFO") == 0) {
+        // Filename is directly in payload
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+        
+        log_info("nm_cmd_info", "user=%s file=%s", msg->username, filename);
+        handle_info(fd, msg->username, filename);
+        return;
+    }
+    
+    if (strcmp(msg->type, "LIST") == 0) {
+        log_info("nm_cmd_list", "user=%s", msg->username);
+        handle_list(fd, msg->username);
+        return;
+    }
+    
+    // Unknown command
     log_error("nm_unknown_msg", "type=%s", msg->type);
+    Error err = error_create(ERR_INVALID, "Unknown command: %s", msg->type);
+    (void)send_error_response(fd, msg->id, msg->username, &err);
 }
 
 // Thread function: read lines, parse, and handle messages until peer closes.

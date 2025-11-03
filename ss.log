@@ -1,3 +1,0 @@
-{"ts":"2025-11-03T22:15:16","level":"INFO","event":"ss_scan_start","msg":"scanning storage directory: ./storage_ss1"}
-{"ts":"2025-11-03T22:15:16","level":"INFO","event":"ss_scan_complete","msg":"found 2 files"}
-{"ts":"2025-11-03T22:15:16","level":"INFO","event":"ss_registered","msg":"payload=host=127.0.0.1,client_port=6001,storage=./storage_ss1,files=manual1.txt,manual2.txt"}

@@ -1,0 +1,430 @@
+#include "commands.h"
+
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "../common/net.h"
+#include "../common/log.h"
+#include "registry.h"
+
+// Helper: Send error response
+int send_error_response(int client_fd, const char *id, const char *username,
+                       const Error *error) {
+    if (!error) return -1;
+    
+    const char *error_code = error_code_to_string(error->code);
+    const char *error_msg = error->message;
+    
+    char resp_buf[MAX_LINE];
+    if (proto_format_error(id, username, "NM", error_code, error_msg,
+                          resp_buf, sizeof(resp_buf)) != 0) {
+        return -1;
+    }
+    
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+// Helper: Send success response
+int send_success_response(int client_fd, const char *id, const char *username,
+                          const char *message) {
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "ACK");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", id ? id : "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", message ? message : "");
+    
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        return -1;
+    }
+    
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+// Helper: Send data response
+int send_data_response(int client_fd, const char *id, const char *username,
+                      const char *data) {
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "DATA");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", id ? id : "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", data ? data : "");
+    
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        return -1;
+    }
+    
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+// Helper: Get SS connection for a file
+// Returns: SS connection fd, or -1 on error
+static int get_ss_connection_for_file(const FileEntry *entry) {
+    if (!entry) return -1;
+    
+    // Connect to SS using host and port from entry
+    int fd = connect_to_host(entry->ss_host, entry->ss_client_port);
+    if (fd < 0) {
+        return -1;
+    }
+    
+    return fd;
+}
+
+// Helper: Find SS by username (for CREATE - need to select SS)
+// Returns: SS connection fd, or -1 on error
+static int find_ss_connection(const char *ss_username) {
+    if (!ss_username) return -1;
+    
+    // Get SS info from registry
+    char ss_host[64] = {0};
+    int ss_client_port = 0;
+    
+    if (registry_get_ss_info(ss_username, ss_host, sizeof(ss_host), &ss_client_port) != 0) {
+        return -1;
+    }
+    
+    // Connect to SS
+    if (strlen(ss_host) > 0 && ss_client_port > 0) {
+        return connect_to_host(ss_host, ss_client_port);
+    }
+    return -1;
+}
+
+// Helper: Select SS for new file (round-robin or first available)
+// Returns: SS username, or NULL if no SS available
+static const char *select_ss_for_new_file(void) {
+    return registry_get_first_ss();
+}
+
+// Handle VIEW command
+int handle_view(int client_fd, const char *username, const char *flags) {
+    if (!username || !client_fd) {
+        return -1;
+    }
+    
+    // Parse flags
+    int show_all = 0;  // -a flag
+    int show_details = 0;  // -l flag
+    
+    if (flags) {
+        if (strchr(flags, 'a')) show_all = 1;
+        if (strchr(flags, 'l')) show_details = 1;
+    }
+    
+    // Get files from index
+    FileEntry *all_files[1000];
+    int total_count = index_get_all_files(all_files, 1000);
+    
+    // Filter files based on access (if not -a)
+    FileEntry *filtered_files[1000];
+    int filtered_count = 0;
+    
+    // Note: For now, we'll show all files if -a, or files owned by user if not
+    // Full ACL checking will require loading metadata from SS (future enhancement)
+    if (show_all) {
+        // Show all files
+        for (int i = 0; i < total_count; i++) {
+            filtered_files[filtered_count++] = all_files[i];
+        }
+    } else {
+        // Show files owned by user (simplified - full ACL check would require SS metadata)
+        for (int i = 0; i < total_count; i++) {
+            if (strcmp(all_files[i]->owner, username) == 0) {
+                filtered_files[filtered_count++] = all_files[i];
+            }
+        }
+    }
+    
+    // Format output
+    char output[8192] = {0};
+    size_t output_pos = 0;
+    
+    if (show_details) {
+        // Table format with details
+        (void)snprintf(output + output_pos, sizeof(output) - output_pos,
+                      "---------------------------------------------------------\n"
+                      "|  Filename  | Words | Chars | Last Access Time | Owner |\n"
+                      "|------------|-------|-------|------------------|-------|\n");
+        output_pos = strlen(output);
+        
+        for (int i = 0; i < filtered_count && output_pos < sizeof(output) - 200; i++) {
+            FileEntry *f = filtered_files[i];
+            char time_str[32];
+            struct tm *tm = localtime(&f->last_accessed);
+            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M", tm);
+            
+            int n = snprintf(output + output_pos, sizeof(output) - output_pos,
+                           "| %-10s | %5d | %5d | %-16s | %-5s |\n",
+                           f->filename, f->word_count, f->char_count,
+                           time_str, f->owner);
+            if (n > 0) output_pos += n;
+        }
+        
+        (void)snprintf(output + output_pos, sizeof(output) - output_pos,
+                      "---------------------------------------------------------\n");
+    } else {
+        // Simple list format
+        for (int i = 0; i < filtered_count && output_pos < sizeof(output) - 100; i++) {
+            int n = snprintf(output + output_pos, sizeof(output) - output_pos,
+                           "--> %s\n", filtered_files[i]->filename);
+            if (n > 0) output_pos += n;
+        }
+    }
+    
+    // Send response
+    return send_data_response(client_fd, "", username, output);
+}
+
+// Handle CREATE command
+int handle_create(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if file already exists
+    FileEntry *existing = index_lookup_file(filename);
+    if (existing) {
+        Error err = error_create(ERR_CONFLICT, "File '%s' already exists", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Select SS for new file
+    const char *ss_username = select_ss_for_new_file();
+    if (!ss_username) {
+        Error err = error_simple(ERR_UNAVAILABLE, "No storage server available");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Find SS connection
+    int ss_fd = find_ss_connection(ss_username);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Send CREATE command to SS
+    Message create_cmd = {0};
+    (void)snprintf(create_cmd.type, sizeof(create_cmd.type), "%s", "CREATE");
+    (void)snprintf(create_cmd.id, sizeof(create_cmd.id), "%s", "1");
+    (void)snprintf(create_cmd.username, sizeof(create_cmd.username), "%s", username);
+    (void)snprintf(create_cmd.role, sizeof(create_cmd.role), "%s", "NM");
+    (void)snprintf(create_cmd.payload, sizeof(create_cmd.payload), "%s", filename);
+    
+    char cmd_line[MAX_LINE];
+    proto_format_line(&create_cmd, cmd_line, sizeof(cmd_line));
+    if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send command to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Wait for ACK from SS
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    
+    if (n <= 0) {
+        Error err = error_simple(ERR_INTERNAL, "No response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    Message ss_resp;
+    if (proto_parse_line(resp_buf, &ss_resp) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Invalid response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if SS returned error
+    if (strcmp(ss_resp.type, "ERROR") == 0) {
+        char error_code[64];
+        char error_msg[256];
+        proto_parse_error(&ss_resp, error_code, sizeof(error_code),
+                         error_msg, sizeof(error_msg));
+        Error err = error_simple(ERR_INTERNAL, error_msg);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // SS created file successfully - add to index
+    // Get SS info for index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        // Get SS info from registry
+        char ss_host[64] = {0};
+        int ss_client_port = 0;
+        
+        if (registry_get_ss_info(ss_username, ss_host, sizeof(ss_host), &ss_client_port) == 0) {
+            // Add to index
+            entry = index_add_file(filename, username, ss_host, ss_client_port, ss_username);
+        }
+    }
+    
+    if (entry) {
+        log_info("nm_file_created", "file=%s owner=%s", filename, username);
+        return send_success_response(client_fd, "", username, "File Created Successfully!");
+    } else {
+        Error err = error_simple(ERR_INTERNAL, "Failed to index file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+}
+
+// Handle DELETE command
+int handle_delete(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file in index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if user is owner
+    // Note: Full ACL check would require loading metadata from SS
+    // For now, we check index owner field
+    if (strcmp(entry->owner, username) != 0) {
+        Error err = error_create(ERR_UNAUTHORIZED, "User '%s' is not the owner of file '%s'", username, filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Send DELETE command to SS
+    Message delete_cmd = {0};
+    (void)snprintf(delete_cmd.type, sizeof(delete_cmd.type), "%s", "DELETE");
+    (void)snprintf(delete_cmd.id, sizeof(delete_cmd.id), "%s", "1");
+    (void)snprintf(delete_cmd.username, sizeof(delete_cmd.username), "%s", username);
+    (void)snprintf(delete_cmd.role, sizeof(delete_cmd.role), "%s", "NM");
+    (void)snprintf(delete_cmd.payload, sizeof(delete_cmd.payload), "%s", filename);
+    
+    char cmd_line[MAX_LINE];
+    proto_format_line(&delete_cmd, cmd_line, sizeof(cmd_line));
+    if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send command to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Wait for ACK from SS
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    
+    if (n <= 0) {
+        Error err = error_simple(ERR_INTERNAL, "No response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    Message ss_resp;
+    if (proto_parse_line(resp_buf, &ss_resp) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Invalid response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if SS returned error
+    if (strcmp(ss_resp.type, "ERROR") == 0) {
+        char error_code[64];
+        char error_msg[256];
+        proto_parse_error(&ss_resp, error_code, sizeof(error_code),
+                         error_msg, sizeof(error_msg));
+        Error err = error_simple(ERR_INTERNAL, error_msg);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // SS deleted file successfully - remove from index
+    if (index_remove_file(filename) == 0) {
+        log_info("nm_file_deleted", "file=%s owner=%s", filename, username);
+        return send_success_response(client_fd, "", username, "File deleted successfully!");
+    } else {
+        Error err = error_simple(ERR_INTERNAL, "Failed to remove file from index");
+        return send_error_response(client_fd, "", username, &err);
+    }
+}
+
+// Handle INFO command
+int handle_info(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file in index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Note: Full ACL check would require loading metadata from SS
+    // For now, we allow if user is owner (simplified)
+    if (strcmp(entry->owner, username) != 0) {
+        // Could check read access here via ACL, but for now just check owner
+        // Future: Load ACL from SS metadata and check read access
+    }
+    
+    // Update last accessed timestamp
+    time_t now = time(NULL);
+    index_update_metadata(filename, now, 0, entry->size_bytes,
+                         entry->word_count, entry->char_count);
+    
+    // Format INFO output
+    char output[1024] = {0};
+    char created_str[32], modified_str[32], accessed_str[32];
+    
+    struct tm *tm = localtime(&entry->created);
+    strftime(created_str, sizeof(created_str), "%Y-%m-%d %H:%M", tm);
+    tm = localtime(&entry->last_modified);
+    strftime(modified_str, sizeof(modified_str), "%Y-%m-%d %H:%M", tm);
+    tm = localtime(&entry->last_accessed);
+    strftime(accessed_str, sizeof(accessed_str), "%Y-%m-%d %H:%M", tm);
+    
+    (void)snprintf(output, sizeof(output),
+                  "--> File: %s\n"
+                  "--> Owner: %s\n"
+                  "--> Created: %s\n"
+                  "--> Last Modified: %s\n"
+                  "--> Size: %zu bytes\n"
+                  "--> Words: %d\n"
+                  "--> Characters: %d\n"
+                  "--> Last Accessed: %s by %s\n",
+                  filename, entry->owner, created_str, modified_str,
+                  entry->size_bytes, entry->word_count, entry->char_count,
+                  accessed_str, username);
+    
+    return send_data_response(client_fd, "", username, output);
+}
+
+// Handle LIST command
+int handle_list(int client_fd, const char *username) {
+    // Get all registered users from registry
+    char output[4096] = {0};
+    size_t output_pos = 0;
+    
+    char clients[100][64];
+    int count = registry_get_clients(clients, 100);
+    
+    for (int i = 0; i < count && output_pos < sizeof(output) - 100; i++) {
+        int n = snprintf(output + output_pos, sizeof(output) - output_pos,
+                         "--> %s\n", clients[i]);
+        if (n > 0) output_pos += n;
+    }
+    
+    return send_data_response(client_fd, "", username, output);
+}
+
