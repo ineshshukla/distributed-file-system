@@ -23,27 +23,37 @@ int proto_parse_line(const char *line, Message *out) {
     if (len > 0 && (tmp[len-1] == '\n' || tmp[len-1] == '\r')) {
         tmp[--len] = '\0';
     }
-    char *saveptr = NULL;
-    char *tok = strtok_r(tmp, "|", &saveptr);
-    if (!tok) return -1;
-    safe_copy(out->type, sizeof(out->type), tok);
-
-    tok = strtok_r(NULL, "|", &saveptr);
-    if (!tok) return -1;
-    safe_copy(out->id, sizeof(out->id), tok);
-
-    tok = strtok_r(NULL, "|", &saveptr);
-    if (!tok) return -1;
-    safe_copy(out->username, sizeof(out->username), tok);
-
-    tok = strtok_r(NULL, "|", &saveptr);
-    if (!tok) return -1;
-    safe_copy(out->role, sizeof(out->role), tok);
-
-    // Remainder of the line (including any '|') is payload.
-    tok = strtok_r(NULL, "", &saveptr);
-    if (!tok) tok = "";
-    safe_copy(out->payload, sizeof(out->payload), tok);
+    
+    // Parse manually to handle empty fields correctly
+    // Format: TYPE|ID|USERNAME|ROLE|PAYLOAD
+    // Find the positions of the 4 separators
+    char *p = tmp;
+    char *fields[5];  // type, id, username, role, payload
+    
+    fields[0] = p;  // Start of type
+    
+    // Find each field separator
+    for (int i = 0; i < 4 && *p; i++) {
+        // Find next '|'
+        while (*p && *p != '|') p++;
+        if (*p == '|') {
+            *p = '\0';  // Null-terminate current field
+            p++;  // Move past '|'
+            fields[i + 1] = p;  // Start of next field
+        } else {
+            // No more separators found
+            return -1;
+        }
+    }
+    
+    // fields[4] is the payload (everything after the 4th '|')
+    // Copy each field
+    safe_copy(out->type, sizeof(out->type), fields[0]);
+    safe_copy(out->id, sizeof(out->id), fields[1]);
+    safe_copy(out->username, sizeof(out->username), fields[2]);
+    safe_copy(out->role, sizeof(out->role), fields[3]);
+    safe_copy(out->payload, sizeof(out->payload), fields[4]);
+    
     return 0;
 }
 

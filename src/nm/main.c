@@ -67,14 +67,18 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
                     char *filename = strtok_r(file_list, ",", &saveptr);
                     
                     while (filename) {
-                        // Index this file (owner unknown at this point, will be set when file is accessed)
-                        // For existing files from SS, we use SS username as placeholder owner
-                        // Real owner will be loaded from metadata when file is accessed
+                        // Index this file with SS username as placeholder owner
+                        // Note: Real owner is stored in metadata on SS, but we don't load it during registration
+                        // The owner will be updated when:
+                        //   1. User creates the file (CREATE command updates owner)
+                        //   2. Future enhancement: Load metadata from SS during registration
+                        // For now, files indexed during SS registration show owner=ss1 until accessed
                         FileEntry *entry = index_add_file(filename, msg->username, ss_host, 
                                                           ss_client_port, msg->username);
                         if (entry) {
                             file_count++;
-                            log_info("nm_file_indexed", "file=%s ss=%s", filename, msg->username);
+                            log_info("nm_file_indexed", "file=%s ss=%s owner=%s", 
+                                     filename, msg->username, entry->owner);
                         }
                         filename = strtok_r(NULL, ",", &saveptr);
                     }

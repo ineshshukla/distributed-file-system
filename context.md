@@ -287,10 +287,11 @@ ERROR [CONFLICT]: File 'test2.txt' already exists
 - **Client-SS Direct Communication**: For READ operations (bypass NM)
 
 ### Known Limitations
-1. **ACL Checking**: Currently simplified - only checks owner for DELETE/INFO. Full ACL checking would require loading metadata from SS on every operation.
-2. **SS Selection**: Uses first available SS (round-robin not fully implemented)
-3. **File Content**: Files are created empty - no content writing yet
-4. **Metadata Updates**: Word/char counts not updated when files are modified
+1. **File Owner on SS Registration**: Files scanned during SS registration show owner=ss1 (placeholder) because metadata isn't loaded during registration. Owner is updated when a user creates/accesses the file. Use `VIEW -a` to see all files including those with placeholder owners.
+2. **ACL Checking**: Currently simplified - only checks owner for DELETE/INFO. Full ACL checking would require loading metadata from SS on every operation.
+3. **SS Selection**: Uses first available SS (round-robin not fully implemented)
+4. **File Content**: Files are created empty - no content writing yet
+5. **Metadata Updates**: Word/char counts not updated when files are modified
 
 ## Troubleshooting
 

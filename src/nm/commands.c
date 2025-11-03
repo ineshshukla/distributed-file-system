@@ -54,14 +54,42 @@ int send_data_response(int client_fd, const char *id, const char *username,
     (void)snprintf(resp.id, sizeof(resp.id), "%s", id ? id : "");
     (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
     (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
-    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", data ? data : "");
+    
+    // Copy data to payload, ensuring it fits (payload is 1792 bytes)
+    // Replace newlines with \x01 (SOH - Start of Heading) to avoid breaking the line-based protocol
+    // This character is unlikely to appear in normal text and won't be stripped by the parser
+    // Client will convert \x01 back to \n
+    if (data && strlen(data) > 0) {
+        size_t data_len = strlen(data);
+        size_t payload_pos = 0;
+        size_t payload_max = sizeof(resp.payload) - 1;
+        
+        for (size_t i = 0; i < data_len && payload_pos < payload_max; i++) {
+            if (data[i] == '\n') {
+                // Replace newline with \x01 (SOH) as placeholder
+                if (payload_pos + 1 < payload_max) {
+                    resp.payload[payload_pos++] = '\x01';
+                }
+            } else {
+                resp.payload[payload_pos++] = data[i];
+            }
+        }
+        resp.payload[payload_pos] = '\0';
+    } else {
+        resp.payload[0] = '\0';
+    }
     
     char resp_buf[MAX_LINE];
     if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        log_error("nm_send_data_fmt", "failed to format response");
         return -1;
     }
     
-    return send_all(client_fd, resp_buf, strlen(resp_buf));
+    int result = send_all(client_fd, resp_buf, strlen(resp_buf));
+    if (result != 0) {
+        log_error("nm_send_data_send", "failed to send response");
+    }
+    return result;
 }
 
 // Helper: Get SS connection for a file
@@ -175,7 +203,23 @@ int handle_view(int client_fd, const char *username, const char *flags) {
         for (int i = 0; i < filtered_count && output_pos < sizeof(output) - 100; i++) {
             int n = snprintf(output + output_pos, sizeof(output) - output_pos,
                            "--> %s\n", filtered_files[i]->filename);
-            if (n > 0) output_pos += n;
+            if (n > 0) {
+                output_pos += n;
+            } else {
+                // snprintf failed or truncated
+                break;
+            }
+        }
+        // Ensure output is null-terminated
+        output[output_pos] = '\0';
+    }
+    
+    // If no files found, show a message
+    if (filtered_count == 0) {
+        if (show_all) {
+            (void)snprintf(output, sizeof(output), "No files found.\n");
+        } else {
+            (void)snprintf(output, sizeof(output), "No files found. (Use -a to view all files)\n");
         }
     }
     
@@ -253,22 +297,31 @@ int handle_create(int client_fd, const char *username, const char *filename) {
         return send_error_response(client_fd, "", username, &err);
     }
     
-    // SS created file successfully - add to index
+    // SS created file successfully - add to index or update existing entry
     // Get SS info for index
     FileEntry *entry = index_lookup_file(filename);
-    if (!entry) {
-        // Get SS info from registry
-        char ss_host[64] = {0};
-        int ss_client_port = 0;
-        
-        if (registry_get_ss_info(ss_username, ss_host, sizeof(ss_host), &ss_client_port) == 0) {
-            // Add to index
+    
+    // Get SS info from registry
+    char ss_host[64] = {0};
+    int ss_client_port = 0;
+    
+    if (registry_get_ss_info(ss_username, ss_host, sizeof(ss_host), &ss_client_port) == 0) {
+        if (!entry) {
+            // File not in index - add it
             entry = index_add_file(filename, username, ss_host, ss_client_port, ss_username);
+        } else {
+            // File exists in index (probably from SS registration with owner=ss1)
+            // Update the owner to the actual creator
+            size_t owner_len = strlen(username);
+            size_t copy_len = (owner_len < sizeof(entry->owner) - 1) ? owner_len : sizeof(entry->owner) - 1;
+            memcpy(entry->owner, username, copy_len);
+            entry->owner[copy_len] = '\0';
+            log_info("nm_file_owner_updated", "file=%s new_owner=%s", filename, username);
         }
     }
     
     if (entry) {
-        log_info("nm_file_created", "file=%s owner=%s", filename, username);
+        log_info("nm_file_created", "file=%s owner=%s", filename, entry->owner);
         return send_success_response(client_fd, "", username, "File Created Successfully!");
     } else {
         Error err = error_simple(ERR_INTERNAL, "Failed to index file");

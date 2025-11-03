@@ -38,6 +38,7 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
     int n = recv_line(g_nm_fd, resp_buf, sizeof(resp_buf));
     if (n <= 0) {
         printf("Error: Failed to receive response from NM\n");
+        fflush(stdout);
         return -1;
     }
     
@@ -45,6 +46,7 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
     Message resp;
     if (proto_parse_line(resp_buf, &resp) != 0) {
         printf("Error: Failed to parse response\n");
+        fflush(stdout);
         return -1;
     }
     
@@ -59,18 +61,43 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
         } else {
             printf("ERROR: %s\n", resp.payload);
         }
+        fflush(stdout);
     } else if (strcmp(resp.type, "ACK") == 0) {
-        // Success response
-        printf("%s\n", resp.payload);
-    } else {
+        // Success response - print payload if non-empty, otherwise print a generic success message
+        if (strlen(resp.payload) > 0) {
+            printf("%s\n", resp.payload);
+        } else {
+            printf("Success\n");
+        }
+        fflush(stdout);
+    } else if (strcmp(resp.type, "DATA") == 0) {
         // Data response (for VIEW, LIST, INFO, etc.)
         // Payload contains the actual data
-        printf("%s", resp.payload);
-        // If payload doesn't end with newline, add one
-        size_t payload_len = strlen(resp.payload);
-        if (payload_len == 0 || resp.payload[payload_len-1] != '\n') {
-            printf("\n");
+        // Convert \x01 (SOH) back to \n (newline) - these were escaped to avoid breaking the line-based protocol
+        if (strlen(resp.payload) > 0) {
+            // Convert \x01 back to \n
+            char *p = resp.payload;
+            while (*p) {
+                if (*p == '\x01') {
+                    putchar('\n');
+                } else {
+                    putchar(*p);
+                }
+                p++;
+            }
+            // If payload doesn't end with newline, add one
+            if (resp.payload[strlen(resp.payload) - 1] != '\x01' && resp.payload[strlen(resp.payload) - 1] != '\n') {
+                printf("\n");
+            }
+        } else {
+            // Empty data response - at least print something
+            printf("(No data)\n");
         }
+        fflush(stdout);
+    } else {
+        // Unknown response type
+        printf("Response: type=%s payload=%s\n", resp.type, resp.payload);
+        fflush(stdout);
     }
     
     return 0;
