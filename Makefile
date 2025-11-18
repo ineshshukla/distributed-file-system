@@ -23,3 +23,7 @@ clean:
 
 .PHONY: all clean
 
+re:
+	make clean
+	make all
+	./run_all.sh

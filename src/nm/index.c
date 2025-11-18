@@ -111,12 +111,16 @@ FileEntry *index_add_file(const char *filename, const char *owner,
     
     // Copy filename
     strncpy(entry->filename, filename, sizeof(entry->filename) - 1);
-    
-    // Copy owner
+    // printf("DEBUG: index_add_file filename=%s\n", entry->filename);
+    // Copy owner (leave empty if NULL - will be loaded from metadata later)
     if (owner) {
+        // printf("DEBUG: Setting owner=%s\n", owner);
         strncpy(entry->owner, owner, sizeof(entry->owner) - 1);
+    } else {
+        // printf("DEBUG: Owner not set (will be loaded from metadata)\n");
+        entry->owner[0] = '\0';  // Empty string indicates owner not yet loaded
     }
-    
+    // printf("DEBUG: index_add_file owner=%s\n", entry->owner);
     // Copy SS information
     if (ss_host) {
         strncpy(entry->ss_host, ss_host, sizeof(entry->ss_host) - 1);

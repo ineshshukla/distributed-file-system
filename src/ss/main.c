@@ -163,6 +163,42 @@ static void *cmd_thread(void *arg) {
                 log_error("ss_delete_failed", "file=%s", filename);
             }
         }
+        // Handle GETMETA command (get file metadata)
+        else if (strcmp(cmd_msg.type, "GETMETA") == 0) {
+            const char *filename = cmd_msg.payload;
+            
+            log_info("ss_cmd_getmeta", "file=%s", filename);
+            
+            // Load metadata from disk
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) == 0) {
+                // Send metadata in DATA response
+                Message data_resp = {0};
+                (void)snprintf(data_resp.type, sizeof(data_resp.type), "%s", "DATA");
+                (void)snprintf(data_resp.id, sizeof(data_resp.id), "%s", cmd_msg.id);
+                (void)snprintf(data_resp.username, sizeof(data_resp.username), "%s", cmd_msg.username);
+                (void)snprintf(data_resp.role, sizeof(data_resp.role), "%s", "SS");
+                
+                // Format metadata as: "owner=alice,size=100,words=50,chars=200"
+                (void)snprintf(data_resp.payload, sizeof(data_resp.payload),
+                              "owner=%s,size=%zu,words=%d,chars=%d",
+                              meta.owner, meta.size_bytes, meta.word_count, meta.char_count);
+                
+                char resp_line[MAX_LINE];
+                proto_format_line(&data_resp, resp_line, sizeof(resp_line));
+                send_all(client_fd, resp_line, strlen(resp_line));
+                
+                log_info("ss_metadata_sent", "file=%s owner=%s", filename, meta.owner);
+            } else {
+                // Send error (metadata not found)
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "NOT_FOUND", "Metadata not found",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                log_error("ss_getmeta_failed", "file=%s", filename);
+            }
+        }
         // Unknown command
         else {
             log_error("ss_unknown_cmd", "type=%s", cmd_msg.type);

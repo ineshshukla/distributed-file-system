@@ -126,6 +126,87 @@ static int find_ss_connection(const char *ss_username) {
     return -1;
 }
 
+// Helper: Load owner from SS metadata if not already set
+// Returns: 0 on success, -1 on error
+static int load_owner_from_ss(FileEntry *entry) {
+    if (!entry) return -1;
+    
+    // If owner is already set (non-empty), no need to load
+    if (entry->owner[0] != '\0') {
+        return 0;  // Already has owner
+    }
+    
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        log_error("nm_load_owner", "Cannot connect to SS for file=%s", entry->filename);
+        return -1;
+    }
+    
+    // Send GETMETA command to SS to get metadata
+    Message meta_cmd = {0};
+    (void)snprintf(meta_cmd.type, sizeof(meta_cmd.type), "%s", "GETMETA");
+    (void)snprintf(meta_cmd.id, sizeof(meta_cmd.id), "%s", "1");
+    (void)snprintf(meta_cmd.username, sizeof(meta_cmd.username), "%s", "NM");
+    (void)snprintf(meta_cmd.role, sizeof(meta_cmd.role), "%s", "NM");
+    (void)snprintf(meta_cmd.payload, sizeof(meta_cmd.payload), "%s", entry->filename);
+    
+    char cmd_line[MAX_LINE];
+    proto_format_line(&meta_cmd, cmd_line, sizeof(cmd_line));
+    if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+        close(ss_fd);
+        log_error("nm_load_owner", "Failed to send GETMETA to SS");
+        return -1;
+    }
+    
+    // Wait for response from SS
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    
+    if (n <= 0) {
+        log_error("nm_load_owner", "No response from SS");
+        return -1;
+    }
+    
+    Message ss_resp;
+    if (proto_parse_line(resp_buf, &ss_resp) != 0) {
+        log_error("nm_load_owner", "Invalid response from SS");
+        return -1;
+    }
+    
+    // Check if SS returned error
+    if (strcmp(ss_resp.type, "ERROR") == 0) {
+        log_error("nm_load_owner", "SS returned error for file=%s", entry->filename);
+        return -1;
+    }
+    
+    // Parse metadata from payload: "owner=alice,size=100,..."
+    char *owner_start = strstr(ss_resp.payload, "owner=");
+    if (owner_start) {
+        owner_start += 6;  // Skip "owner="
+        char *owner_end = strchr(owner_start, ',');
+        if (owner_end) {
+            size_t owner_len = owner_end - owner_start;
+            if (owner_len < sizeof(entry->owner)) {
+                memcpy(entry->owner, owner_start, owner_len);
+                entry->owner[owner_len] = '\0';
+                log_info("nm_owner_loaded", "file=%s owner=%s", entry->filename, entry->owner);
+                return 0;
+            }
+        } else {
+            // No comma after owner (it's the last field or only field)
+            strncpy(entry->owner, owner_start, sizeof(entry->owner) - 1);
+            entry->owner[sizeof(entry->owner) - 1] = '\0';
+            log_info("nm_owner_loaded", "file=%s owner=%s", entry->filename, entry->owner);
+            return 0;
+        }
+    }
+    
+    log_error("nm_load_owner", "Owner not found in metadata for file=%s", entry->filename);
+    return -1;
+}
+
 // Helper: Select SS for new file (round-robin or first available)
 // Returns: SS username, or NULL if no SS available
 static const char *select_ss_for_new_file(void) {
@@ -134,6 +215,7 @@ static const char *select_ss_for_new_file(void) {
 
 // Handle VIEW command
 int handle_view(int client_fd, const char *username, const char *flags) {
+    // printf("DEBUG: handle_view called with username=%s flags=%s\n", username, flags);
     if (!username || !client_fd) {
         return -1;
     }
@@ -155,16 +237,27 @@ int handle_view(int client_fd, const char *username, const char *flags) {
     FileEntry *filtered_files[1000];
     int filtered_count = 0;
     
-    // Note: For now, we'll show all files if -a, or files owned by user if not
-    // Full ACL checking will require loading metadata from SS (future enhancement)
+    // Load owner from SS metadata for files that don't have it set
+    // printf("DEBUG: SHOW_ALL :%d total_count=%d\n", show_all, total_count);
+    for (int i = 0; i < total_count; i++) {
+        if (all_files[i]->owner[0] == '\0') {
+            // Owner not set - load from SS metadata
+            load_owner_from_ss(all_files[i]);
+        }
+    }
+    
     if (show_all) {
         // Show all files
         for (int i = 0; i < total_count; i++) {
             filtered_files[filtered_count++] = all_files[i];
         }
     } else {
-        // Show files owned by user (simplified - full ACL check would require SS metadata)
+        // Show files owned by user
+        // printf("DEBUG: %d\n",total_count);;
+        // fflush(stdout);
         for (int i = 0; i < total_count; i++) {
+            log_info("nm_view_check_owner", "file=%s owner=%s user=%s",
+                     all_files[i]->filename, all_files[i]->owner, username);
             if (strcmp(all_files[i]->owner, username) == 0) {
                 filtered_files[filtered_count++] = all_files[i];
             }
@@ -422,6 +515,11 @@ int handle_info(int client_fd, const char *username, const char *filename) {
     if (!entry) {
         Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
         return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Load owner from SS metadata if not already set
+    if (entry->owner[0] == '\0') {
+        load_owner_from_ss(entry);
     }
     
     // Note: Full ACL check would require loading metadata from SS
