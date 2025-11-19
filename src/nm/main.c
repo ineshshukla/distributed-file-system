@@ -116,6 +116,7 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         }
         
         registry_add("SS", msg->username, msg->payload);
+        registry_set_ss_file_count(msg->username, file_count);
         log_info("nm_ss_register", "ip=%s user=%s files=%d indexed", ip, msg->username, file_count);
         
         Message ack = {0};
@@ -250,6 +251,18 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         
         log_info("nm_cmd_stream", "user=%s file=%s", msg->username, filename);
         handle_stream(fd, msg->username, filename);
+        return;
+    }
+
+    if (strcmp(msg->type, "UNDO") == 0) {
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+
+        log_info("nm_cmd_undo", "user=%s file=%s", msg->username, filename);
+        handle_undo(fd, msg->username, filename);
         return;
     }
 

@@ -278,6 +278,8 @@ static int load_owner_from_ss(FileEntry *entry) {
 // Helper: Select SS for new file (round-robin or first available)
 // Returns: SS username, or NULL if no SS available
 static const char *select_ss_for_new_file(void) {
+    const char *least = registry_get_least_loaded_ss();
+    if (least) return least;
     return registry_get_first_ss();
 }
 
@@ -483,6 +485,7 @@ int handle_create(int client_fd, const char *username, const char *filename) {
     
     if (entry) {
         log_info("nm_file_created", "file=%s owner=%s", filename, entry->owner);
+        registry_adjust_ss_file_count(ss_username, 1);
         return send_success_response(client_fd, "", username, "File Created Successfully!");
     } else {
         Error err = error_simple(ERR_INTERNAL, "Failed to index file");
@@ -564,6 +567,7 @@ int handle_delete(int client_fd, const char *username, const char *filename) {
     // SS deleted file successfully - remove from index
     if (index_remove_file(filename) == 0) {
         log_info("nm_file_deleted", "file=%s owner=%s", filename, username);
+        registry_adjust_ss_file_count(entry->ss_username, -1);
         return send_success_response(client_fd, "", username, "File deleted successfully!");
     } else {
         Error err = error_simple(ERR_INTERNAL, "Failed to remove file from index");
@@ -740,6 +744,47 @@ int handle_stream(int client_fd, const char *username, const char *filename) {
     }
     
     log_info("nm_stream_ss_info", "file=%s user=%s ss=%s:%d", filename, username, entry->ss_host, entry->ss_client_port);
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+int handle_undo(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 0, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    char ss_info[256];
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "SS_INFO");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", ss_info);
+
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to format response");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    log_info("nm_cmd_undo", "user=%s file=%s", username, filename);
     return send_all(client_fd, resp_buf, strlen(resp_buf));
 }
 

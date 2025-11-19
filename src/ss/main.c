@@ -703,6 +703,63 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
             close(client_fd);
             return;
         }
+        else if (strcmp(cmd_msg.type, "UNDO") == 0) {
+            const char *filename = cmd_msg.payload;
+            const char *username = cmd_msg.username;
+
+            log_info("ss_cmd_undo", "file=%s user=%s", filename, username);
+
+            if (!undo_exists(ctx->storage_dir, filename)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "NO_UNDO", "No undo information available",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+
+            FileMetadata current_meta;
+            if (metadata_load(ctx->storage_dir, filename, &current_meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "NOT_FOUND", "File not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+
+            if (undo_restore_state(ctx->storage_dir, filename) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "INTERNAL", "Failed to restore undo state",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+
+            FileMetadata restored_meta;
+            if (metadata_load(ctx->storage_dir, filename, &restored_meta) == 0) {
+                restored_meta.acl = current_meta.acl;
+                metadata_save(ctx->storage_dir, filename, &restored_meta);
+            }
+
+            Message ack = {0};
+            (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+            (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+            (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+            (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "Undo Successful!");
+
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            log_info("ss_undo_restored", "file=%s", filename);
+            close(client_fd);
+            return;
+        }
         // Handle UPDATE_ACL command (from NM)
         else if (strcmp(cmd_msg.type, "UPDATE_ACL") == 0) {
             // Payload format: "action=ADD|REMOVE,flag=R|W,filename=FILE,target_user=USER"
@@ -951,6 +1008,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--client-port") && i+1 < argc) ctx.client_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--storage") && i+1 < argc) ctx.storage_dir = argv[++i];
         else if (!strcmp(argv[i], "--username") && i+1 < argc) ctx.username = argv[++i];
+    }
+    if (ctx.username) {
+        char log_path[128];
+        snprintf(log_path, sizeof(log_path), "ss_%s.log", ctx.username);
+        log_set_file(log_path);
     }
     // Ensure storage directory exists
     ensure_storage_dir(ctx.storage_dir);

@@ -193,5 +193,10 @@ void count_file_stats(const char *content, int *word_count, int *char_count);
 // Ensure sentence metadata exists (build default single sentence if needed)
 int metadata_ensure_sentences(const char *storage_dir, const char *filename, FileMetadata *metadata);
 
+// Undo helpers
+int undo_save_state(const char *storage_dir, const char *filename);
+int undo_restore_state(const char *storage_dir, const char *filename);
+int undo_exists(const char *storage_dir, const char *filename);
+
 #endif
 

@@ -427,6 +427,10 @@ int write_session_commit(WriteSession *session,
         format_error(error_buf, error_buf_len, "No active write session");
         return -1;
     }
+    if (undo_save_state(session->storage_dir, session->filename) != 0) {
+        format_error(error_buf, error_buf_len, "Failed to snapshot undo state");
+        return -1;
+    }
     char *sentence_text = sentence_entry_to_string(&session->sentence_entry);
     if (!sentence_text) {
         format_error(error_buf, error_buf_len, "Failed to build sentence");

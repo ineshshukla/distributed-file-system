@@ -2,7 +2,7 @@
 
 ## Current Status
 
-### ✅ Implemented (Phase 1–4)
+### ✅ Implemented (Phase 1–5)
 - **VIEW** (with -a, -l flags) - 10 marks
 - **CREATE** - 10 marks
 - **DELETE** - 10 marks
@@ -12,14 +12,14 @@
 - **STREAM** (word-by-word with delay) - 15 marks
 - **ADDACCESS / REMACCESS** (owner-managed ACL updates) - 15 marks
 - **WRITE** (sentence parsing, locking, client→NM→SS interactive flow) - 30 marks
+- **UNDO** (single-level revert) - 15 marks
 - **System Requirements**: Data Persistence, Logging, Error Handling, Efficient Search - 35 marks
 - **Specifications**: Initialization, NM, SS, Client - 10 marks
 
-**Total Completed: 165 marks**
+**Total Completed: 180 marks**
 
-### ❌ Remaining (30 marks)
-1. **UNDO** - 15 marks (depends on WRITE)
-2. **EXEC** - 15 marks
+### ❌ Remaining (15 marks)
+1. **EXEC** - 15 marks
 
 ---
 
@@ -335,10 +335,10 @@
 
 ---
 
-## Phase 5: UNDO Command
+## Phase 5: UNDO Command ✅
 **Goal**: Single-level undo for file changes
 
-### Step 1: Change Tracking
+### Step 1: Change Tracking ✅
 **What**: Track file state before each WRITE operation
 
 **Tasks**:
@@ -355,12 +355,12 @@
    - Read previous file content from undo file
    - Restore file to previous state
 
-**Testing**:
-- [ ] Save state before WRITE
-- [ ] Overwrite previous undo state
-- [ ] Load undo state correctly
+**Testing (in progress)**:
+- [x] Save state before WRITE (snapshot taken just before commit)
+- [x] Overwrite previous undo state (latest snapshot wins)
+- [ ] Load undo state correctly (manual scenario pending)
 
-### Step 2: UNDO Command Implementation
+### Step 2: UNDO Command Implementation ✅
 **What**: Revert file to previous state
 
 **Tasks**:
@@ -374,17 +374,17 @@
    - Update metadata (last_modified)
    - Clear undo state (single undo only)
 
-**Testing**:
-- [ ] UNDO after one WRITE
-- [ ] UNDO after multiple WRITEs (reverts last one)
-- [ ] UNDO without previous change (error)
-- [ ] UNDO by different user (works - file-specific)
+**Testing (in progress)**:
+- [ ] UNDO after one WRITE (to verify file+metadata rollback)
+- [ ] UNDO after multiple WRITEs (ensures only last change is reverted)
+- [ ] UNDO without previous change (expect NO_UNDO error)
+- [ ] UNDO by different user with read access
 
 **Verification Checklist**:
 - [ ] UNDO reverts last change correctly
 - [ ] UNDO works for any user with read access
-- [ ] Single-level undo only
-- [ ] No compiler warnings
+- [x] Single-level undo only (snapshot overwritten per commit)
+- [x] No compiler warnings (`make` clean)
 - [ ] Manual test runs documented
 
 ---
@@ -437,9 +437,9 @@
 - **Actual Outcome**: Completed with interactive client workflow, sentence-level locking, SS worker pool, and metadata persistence. Additional stress/concurrency tests queued.
 - **Dependencies**: None (unblocks Phase 5)
 
-### Phase 5: UNDO Command (15 marks)
+### Phase 5: UNDO Command (15 marks) ✅
 - Change tracking and restoration
-- **Estimated Time**: 1-2 days
+- **Actual Outcome**: Undo snapshot stored before each commit, SS exposes UNDO command, NM/client wiring complete. Targeted manual tests pending.
 - **Dependencies**: Phase 4 (WRITE)
 
 ### Phase 6: EXEC Command (15 marks)
@@ -447,8 +447,8 @@
 - **Estimated Time**: 1 day
 - **Dependencies**: None
 
-**Total Remaining: 70 marks**
-**Updated Estimate: 4-6 days (Phase 5–6)**
+**Total Remaining: 15 marks**
+**Updated Estimate: 1 day (Phase 6)**
 
 ---
 

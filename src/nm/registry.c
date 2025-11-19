@@ -11,11 +11,23 @@ static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
 
 // Add entry to registry
 void registry_add(const char *role, const char *username, const char *payload) {
-    RegistryEntry *e = (RegistryEntry*)calloc(1, sizeof(RegistryEntry));
-    (void)snprintf(e->role, sizeof(e->role), "%s", role ? role : "");
-    (void)snprintf(e->username, sizeof(e->username), "%s", username ? username : "");
-    (void)snprintf(e->payload, sizeof(e->payload), "%s", payload ? payload : "");
+    if (!role || !username) return;
     pthread_mutex_lock(&g_registry_mu);
+    RegistryEntry *entry = g_registry_head;
+    while (entry) {
+        if (strcmp(entry->role, role) == 0 &&
+            strcmp(entry->username, username) == 0) {
+            snprintf(entry->payload, sizeof(entry->payload), "%s", payload ? payload : "");
+            pthread_mutex_unlock(&g_registry_mu);
+            return;
+        }
+        entry = entry->next;
+    }
+    RegistryEntry *e = (RegistryEntry*)calloc(1, sizeof(RegistryEntry));
+    snprintf(e->role, sizeof(e->role), "%s", role);
+    snprintf(e->username, sizeof(e->username), "%s", username);
+    snprintf(e->payload, sizeof(e->payload), "%s", payload ? payload : "");
+    e->file_count = 0;
     e->next = g_registry_head;
     g_registry_head = e;
     pthread_mutex_unlock(&g_registry_mu);
@@ -36,6 +48,31 @@ const char *registry_get_first_ss(void) {
             return selected_ss;
         }
         entry = entry->next;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+    return NULL;
+}
+
+const char *registry_get_least_loaded_ss(void) {
+    static char selected_ss[64] = {0};
+    pthread_mutex_lock(&g_registry_mu);
+    RegistryEntry *entry = g_registry_head;
+    int best_count = -1;
+    const char *best_username = NULL;
+    while (entry) {
+        if (strcmp(entry->role, "SS") == 0) {
+            if (best_username == NULL || entry->file_count < best_count) {
+                best_username = entry->username;
+                best_count = entry->file_count;
+            }
+        }
+        entry = entry->next;
+    }
+    if (best_username) {
+        strncpy(selected_ss, best_username, sizeof(selected_ss) - 1);
+        selected_ss[sizeof(selected_ss) - 1] = '\0';
+        pthread_mutex_unlock(&g_registry_mu);
+        return selected_ss;
     }
     pthread_mutex_unlock(&g_registry_mu);
     return NULL;
@@ -95,5 +132,34 @@ int registry_get_clients(char clients[][64], int max_clients) {
     }
     pthread_mutex_unlock(&g_registry_mu);
     return count;
+}
+
+void registry_set_ss_file_count(const char *ss_username, int count) {
+    pthread_mutex_lock(&g_registry_mu);
+    RegistryEntry *entry = g_registry_head;
+    while (entry) {
+        if (strcmp(entry->role, "SS") == 0 &&
+            strcmp(entry->username, ss_username) == 0) {
+            entry->file_count = count;
+            break;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+}
+
+void registry_adjust_ss_file_count(const char *ss_username, int delta) {
+    pthread_mutex_lock(&g_registry_mu);
+    RegistryEntry *entry = g_registry_head;
+    while (entry) {
+        if (strcmp(entry->role, "SS") == 0 &&
+            strcmp(entry->username, ss_username) == 0) {
+            entry->file_count += delta;
+            if (entry->file_count < 0) entry->file_count = 0;
+            break;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
 }
 

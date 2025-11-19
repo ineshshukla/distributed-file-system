@@ -20,6 +20,7 @@ static char g_username[64] = {0};
 // Forward declaration
 static int handle_ss_command(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, int ss_port);
+static int perform_undo_command(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 
 // Send command to NM and receive response
 // Returns: 0 on success, -1 on error
@@ -159,6 +160,9 @@ static int handle_ss_command(const ParsedCommand *cmd, const char *ss_host, int 
 
     if (strcmp(cmd->cmd, "WRITE") == 0) {
         return perform_write_session(cmd, ss_host, ss_port);
+    }
+    if (strcmp(cmd->cmd, "UNDO") == 0) {
+        return perform_undo_command(cmd, ss_host, ss_port);
     }
     
     // Connect to SS
@@ -566,6 +570,71 @@ static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, 
             fflush(stdout);
         }
     }
+    close(ss_fd);
+    return 0;
+}
+
+static int perform_undo_command(const ParsedCommand *cmd, const char *ss_host, int ss_port) {
+    if (!cmd || cmd->argc < 1) {
+        printf("Error: UNDO requires a filename\n");
+        fflush(stdout);
+        return -1;
+    }
+    int ss_fd = connect_to_host(ss_host, ss_port);
+    if (ss_fd < 0) {
+        printf("Error: Failed to connect to storage server at %s:%d\n", ss_host, ss_port);
+        fflush(stdout);
+        return -1;
+    }
+    Message req = {0};
+    (void)snprintf(req.type, sizeof(req.type), "%s", "UNDO");
+    (void)snprintf(req.id, sizeof(req.id), "%ld", (long)time(NULL));
+    (void)snprintf(req.username, sizeof(req.username), "%s", g_username);
+    (void)snprintf(req.role, sizeof(req.role), "%s", "CLIENT");
+    (void)snprintf(req.payload, sizeof(req.payload), "%s", cmd->args[0]);
+
+    char line_buf[MAX_LINE];
+    if (proto_format_line(&req, line_buf, sizeof(line_buf)) != 0 ||
+        send_all(ss_fd, line_buf, strlen(line_buf)) != 0) {
+        printf("Error: Failed to send UNDO request to SS\n");
+        fflush(stdout);
+        close(ss_fd);
+        return -1;
+    }
+
+    int n = recv_line(ss_fd, line_buf, sizeof(line_buf));
+    if (n <= 0) {
+        printf("Error: No response from storage server\n");
+        fflush(stdout);
+        close(ss_fd);
+        return -1;
+    }
+    Message resp;
+    if (proto_parse_line(line_buf, &resp) != 0) {
+        printf("Error: Failed to parse response from SS\n");
+        fflush(stdout);
+        close(ss_fd);
+        return -1;
+    }
+    if (strcmp(resp.type, "ERROR") == 0) {
+        char error_code[64];
+        char error_msg[256];
+        if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                              error_msg, sizeof(error_msg)) == 0) {
+            printf("ERROR [%s]: %s\n", error_code, error_msg);
+        } else {
+            printf("ERROR: %s\n", resp.payload);
+        }
+    } else if (strcmp(resp.type, "ACK") == 0) {
+        if (strlen(resp.payload) > 0) {
+            printf("%s\n", resp.payload);
+        } else {
+            printf("Undo Successful!\n");
+        }
+    } else {
+        printf("Response: type=%s payload=%s\n", resp.type, resp.payload);
+    }
+    fflush(stdout);
     close(ss_fd);
     return 0;
 }

@@ -11,6 +11,7 @@ typedef struct RegistryEntry {
     char role[16];      // "SS" or "CLIENT"
     char username[64];
     char payload[256];  // Additional info (host, port, etc.)
+    int file_count;
     struct RegistryEntry *next;
 } RegistryEntry;
 
@@ -20,6 +21,7 @@ void registry_add(const char *role, const char *username, const char *payload);
 // Get first SS entry (for round-robin selection)
 // Returns username of first SS, or NULL if none
 const char *registry_get_first_ss(void);
+const char *registry_get_least_loaded_ss(void);
 
 // Get SS info (host and client_port) by username
 // Returns 0 on success, -1 if SS not found
@@ -29,6 +31,9 @@ int registry_get_ss_info(const char *ss_username, char *host, size_t host_len,
 // Get all client usernames
 // Fills provided array and returns count
 int registry_get_clients(char clients[][64], int max_clients);
+
+void registry_set_ss_file_count(const char *ss_username, int count);
+void registry_adjust_ss_file_count(const char *ss_username, int delta);
 
 #endif
 

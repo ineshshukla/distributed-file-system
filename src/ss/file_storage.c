@@ -9,6 +9,49 @@
 #include <time.h>
 #include <unistd.h>
 
+static int copy_file_atomic(const char *src, const char *dst) {
+    if (!src || !dst) return -1;
+    FILE *in = fopen(src, "rb");
+    if (!in) return -1;
+    char tmp_path[520];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", dst);
+    FILE *out = fopen(tmp_path, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    char buffer[4096];
+    size_t n;
+    int result = 0;
+    while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0) {
+        if (fwrite(buffer, 1, n, out) != n) {
+            result = -1;
+            break;
+        }
+    }
+    if (ferror(in)) result = -1;
+    fflush(out);
+    fsync(fileno(out));
+    fclose(in);
+    fclose(out);
+    if (result == 0) {
+        if (rename(tmp_path, dst) != 0) {
+            unlink(tmp_path);
+            result = -1;
+        }
+    } else {
+        unlink(tmp_path);
+    }
+    return result;
+}
+
+static void build_undo_paths(const char *storage_dir, const char *filename,
+                             char *meta_path, size_t meta_len,
+                             char *data_path, size_t data_len) {
+    snprintf(meta_path, meta_len, "%s/metadata/%s.undo.meta", storage_dir, filename);
+    snprintf(data_path, data_len, "%s/metadata/%s.undo.data", storage_dir, filename);
+}
+
 // Helper: Ensure directories exist (create if they don't)
 static void ensure_directories(const char *storage_dir) {
     char files_dir[512];
@@ -474,5 +517,58 @@ int metadata_ensure_sentences(const char *storage_dir, const char *filename, Fil
     metadata->sentences[0].word_count = metadata->word_count;
     metadata->sentences[0].char_count = metadata->char_count;
     return metadata_save(storage_dir, filename, metadata);
+}
+
+int undo_save_state(const char *storage_dir, const char *filename) {
+    if (!storage_dir || !filename) return -1;
+    char meta_src[512];
+    snprintf(meta_src, sizeof(meta_src), "%s/metadata/%s.meta", storage_dir, filename);
+    char file_src[512];
+    snprintf(file_src, sizeof(file_src), "%s/files/%s", storage_dir, filename);
+    char undo_meta[512];
+    char undo_data[512];
+    build_undo_paths(storage_dir, filename, undo_meta, sizeof(undo_meta),
+                     undo_data, sizeof(undo_data));
+    if (copy_file_atomic(meta_src, undo_meta) != 0) {
+        return -1;
+    }
+    if (copy_file_atomic(file_src, undo_data) != 0) {
+        unlink(undo_meta);
+        return -1;
+    }
+    return 0;
+}
+
+int undo_exists(const char *storage_dir, const char *filename) {
+    if (!storage_dir || !filename) return 0;
+    char undo_meta[512];
+    char undo_data[512];
+    build_undo_paths(storage_dir, filename, undo_meta, sizeof(undo_meta),
+                     undo_data, sizeof(undo_data));
+    return (access(undo_meta, F_OK) == 0 && access(undo_data, F_OK) == 0);
+}
+
+int undo_restore_state(const char *storage_dir, const char *filename) {
+    if (!storage_dir || !filename) return -1;
+    char undo_meta[512];
+    char undo_data[512];
+    build_undo_paths(storage_dir, filename, undo_meta, sizeof(undo_meta),
+                     undo_data, sizeof(undo_data));
+    if (access(undo_meta, F_OK) != 0 || access(undo_data, F_OK) != 0) {
+        return -1;
+    }
+    char meta_dst[512];
+    snprintf(meta_dst, sizeof(meta_dst), "%s/metadata/%s.meta", storage_dir, filename);
+    char file_dst[512];
+    snprintf(file_dst, sizeof(file_dst), "%s/files/%s", storage_dir, filename);
+    if (copy_file_atomic(undo_meta, meta_dst) != 0) {
+        return -1;
+    }
+    if (copy_file_atomic(undo_data, file_dst) != 0) {
+        return -1;
+    }
+    unlink(undo_meta);
+    unlink(undo_data);
+    return 0;
 }
 

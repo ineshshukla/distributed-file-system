@@ -121,6 +121,8 @@ int handle_read(int client_fd, const char *username, const char *filename);
 // 4. Sends SS_INFO message with host=IP,port=PORT
 int handle_stream(int client_fd, const char *username, const char *filename);
 
+int handle_undo(int client_fd, const char *username, const char *filename);
+
 // Handle WRITE command - returns SS info after checking write access
 int handle_write(int client_fd, const char *username, const char *filename, int sentence_index);
 
