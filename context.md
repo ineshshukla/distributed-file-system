@@ -278,13 +278,15 @@ ERROR [CONFLICT]: File 'test2.txt' already exists
 
 ## Next Steps / Future Work
 
-### Phase 3 (Future)
-- **READ Command**: Client-SS direct communication for file reading
-- **Full ACL Enforcement**: Check ACL on all file operations (currently only checks owner)
-- **File Content Operations**: Write content to files, update word/char counts
-- **Trie for Prefix Search**: Efficient prefix-based file search
-- **Multi-SS Support**: Load balancing across multiple storage servers
-- **Client-SS Direct Communication**: For READ operations (bypass NM)
+**See `PHASE_PLAN.md` for detailed implementation plan of remaining work.**
+
+### Remaining Work Summary (100 marks)
+1. **Phase 3**: READ, STREAM, Access Control Commands (40 marks)
+2. **Phase 4**: WRITE Command with sentence locking (30 marks) - Most complex
+3. **Phase 5**: UNDO Command (15 marks) - Depends on Phase 4
+4. **Phase 6**: EXEC Command (15 marks)
+
+**Current Status**: Phase 1 & 2 complete (95 marks). Remaining: 100 marks.
 
 ### Known Limitations
 1. **File Owner on SS Registration**: Files scanned during SS registration show owner=ss1 (placeholder) because metadata isn't loaded during registration. Owner is updated when a user creates/accesses the file. Use `VIEW -a` to see all files including those with placeholder owners.

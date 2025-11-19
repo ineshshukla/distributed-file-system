@@ -1,11 +1,13 @@
 // Storage Server (SS): prepares local storage dir, registers to NM,
 // and sends periodic heartbeats.
 // Phase 2: Now includes file scanning and storage management.
+#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../common/net.h"
@@ -162,6 +164,435 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 log_error("ss_delete_failed", "file=%s", filename);
             }
+            close(client_fd);
+        }
+        // Handle READ command (from client)
+        else if (strcmp(cmd_msg.type, "READ") == 0) {
+            const char *filename = cmd_msg.payload;
+            const char *username = cmd_msg.username;
+            
+            log_info("ss_cmd_read", "file=%s user=%s", filename, username);
+            
+            // Check if file exists
+            if (!file_exists(ctx->storage_dir, filename)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "NOT_FOUND", "File not found",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_read_failed", "file=%s reason=not_found", filename);
+                continue;
+            }
+            
+            // Load metadata to check read access
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "INTERNAL", "Failed to load file metadata",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_read_failed", "file=%s reason=metadata_load_failed", filename);
+                continue;
+            }
+            
+            // Check read access using ACL
+            if (!acl_check_read(&meta.acl, username)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "UNAUTHORIZED", "User does not have read access",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_read_failed", "file=%s user=%s reason=unauthorized", filename, username);
+                continue;
+            }
+            
+            // Read file content
+            char content[65536];  // Max 64KB for now
+            size_t actual_size = 0;
+            if (file_read(ctx->storage_dir, filename, content, sizeof(content), &actual_size) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "INTERNAL", "Failed to read file content",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_read_failed", "file=%s reason=read_failed", filename);
+                continue;
+            }
+            
+            // Send file content
+            // Replace newlines with \x01 (SOH) to avoid breaking line-based protocol
+            // Client will convert back to \n
+            // Send in chunks to handle large files
+            size_t content_pos = 0;
+            size_t content_len = actual_size;
+            
+            while (content_pos < content_len) {
+                Message data_msg = {0};
+                (void)snprintf(data_msg.type, sizeof(data_msg.type), "%s", "DATA");
+                (void)snprintf(data_msg.id, sizeof(data_msg.id), "%s", cmd_msg.id);
+                (void)snprintf(data_msg.username, sizeof(data_msg.username), "%s", username);
+                (void)snprintf(data_msg.role, sizeof(data_msg.role), "%s", "SS");
+                
+                // Copy chunk, replacing \n with \x01
+                size_t payload_pos = 0;
+                size_t payload_max = sizeof(data_msg.payload) - 1;
+                
+                while (content_pos < content_len && payload_pos < payload_max) {
+                    if (content[content_pos] == '\n') {
+                        data_msg.payload[payload_pos++] = '\x01';
+                    } else {
+                        data_msg.payload[payload_pos++] = content[content_pos];
+                    }
+                    content_pos++;
+                }
+                data_msg.payload[payload_pos] = '\0';
+                
+                char data_buf[MAX_LINE];
+                if (proto_format_line(&data_msg, data_buf, sizeof(data_buf)) == 0) {
+                    send_all(client_fd, data_buf, strlen(data_buf));
+                }
+            }
+            
+            // Send STOP packet
+            Message stop_msg = {0};
+            (void)snprintf(stop_msg.type, sizeof(stop_msg.type), "%s", "STOP");
+            (void)snprintf(stop_msg.id, sizeof(stop_msg.id), "%s", cmd_msg.id);
+            (void)snprintf(stop_msg.username, sizeof(stop_msg.username), "%s", username);
+            (void)snprintf(stop_msg.role, sizeof(stop_msg.role), "%s", "SS");
+            stop_msg.payload[0] = '\0';
+            
+            char stop_buf[MAX_LINE];
+            if (proto_format_line(&stop_msg, stop_buf, sizeof(stop_buf)) == 0) {
+                send_all(client_fd, stop_buf, strlen(stop_buf));
+            }
+            
+            // Update last accessed timestamp
+            metadata_update_last_accessed(ctx->storage_dir, filename);
+            
+            log_info("ss_file_read", "file=%s user=%s size=%zu", filename, username, actual_size);
+            close(client_fd);
+        }
+        // Handle STREAM command (from client)
+        else if (strcmp(cmd_msg.type, "STREAM") == 0) {
+            const char *filename = cmd_msg.payload;
+            const char *username = cmd_msg.username;
+            
+            log_info("ss_cmd_stream", "file=%s user=%s", filename, username);
+            
+            // Check if file exists
+            if (!file_exists(ctx->storage_dir, filename)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "NOT_FOUND", "File not found",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_stream_failed", "file=%s reason=not_found", filename);
+                continue;
+            }
+            
+            // Load metadata to check read access
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "INTERNAL", "Failed to load file metadata",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_stream_failed", "file=%s reason=metadata_load_failed", filename);
+                continue;
+            }
+            
+            // Check read access using ACL
+            if (!acl_check_read(&meta.acl, username)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "UNAUTHORIZED", "User does not have read access",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_stream_failed", "file=%s user=%s reason=unauthorized", filename, username);
+                continue;
+            }
+            
+            // Read file content
+            char content[65536];  // Max 64KB for now
+            size_t actual_size = 0;
+            if (file_read(ctx->storage_dir, filename, content, sizeof(content), &actual_size) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                  "INTERNAL", "Failed to read file content",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_stream_failed", "file=%s reason=read_failed", filename);
+                continue;
+            }
+            
+            // Parse content into words (split by spaces)
+            // Send each word with 0.1s delay
+            char *word_start = content;
+            char *word_end;
+            int word_count = 0;
+            
+            // Skip leading whitespace
+            while (*word_start == ' ' || *word_start == '\t' || *word_start == '\n' || *word_start == '\r') {
+                word_start++;
+            }
+            
+            while (*word_start != '\0') {
+                // Find end of word (space, tab, newline, or null)
+                word_end = word_start;
+                while (*word_end != '\0' && *word_end != ' ' && *word_end != '\t' && 
+                       *word_end != '\n' && *word_end != '\r') {
+                    word_end++;
+                }
+                
+                if (word_end > word_start) {
+                    // Extract word
+                    size_t word_len = word_end - word_start;
+                    char word[256] = {0};
+                    size_t copy_len = (word_len < sizeof(word) - 1) ? word_len : sizeof(word) - 1;
+                    memcpy(word, word_start, copy_len);
+                    word[copy_len] = '\0';
+                    
+                    // Send word as DATA packet
+                    Message data_msg = {0};
+                    (void)snprintf(data_msg.type, sizeof(data_msg.type), "%s", "DATA");
+                    (void)snprintf(data_msg.id, sizeof(data_msg.id), "%s", cmd_msg.id);
+                    (void)snprintf(data_msg.username, sizeof(data_msg.username), "%s", username);
+                    (void)snprintf(data_msg.role, sizeof(data_msg.role), "%s", "SS");
+                    (void)snprintf(data_msg.payload, sizeof(data_msg.payload), "%s", word);
+                    
+                    char data_buf[MAX_LINE];
+                    if (proto_format_line(&data_msg, data_buf, sizeof(data_buf)) == 0) {
+                        send_all(client_fd, data_buf, strlen(data_buf));
+                    }
+                    
+                    word_count++;
+                    
+                    // Delay 0.1 seconds using nanosleep
+                    struct timespec delay = {0, 100000000};  // 0.1 seconds = 100000000 nanoseconds
+                    nanosleep(&delay, NULL);
+                }
+                
+                // Move to next word (skip whitespace)
+                word_start = word_end;
+                while (*word_start == ' ' || *word_start == '\t' || *word_start == '\n' || *word_start == '\r') {
+                    word_start++;
+                }
+            }
+            
+            // Send STOP packet
+            Message stop_msg = {0};
+            (void)snprintf(stop_msg.type, sizeof(stop_msg.type), "%s", "STOP");
+            (void)snprintf(stop_msg.id, sizeof(stop_msg.id), "%s", cmd_msg.id);
+            (void)snprintf(stop_msg.username, sizeof(stop_msg.username), "%s", username);
+            (void)snprintf(stop_msg.role, sizeof(stop_msg.role), "%s", "SS");
+            stop_msg.payload[0] = '\0';
+            
+            char stop_buf[MAX_LINE];
+            if (proto_format_line(&stop_msg, stop_buf, sizeof(stop_buf)) == 0) {
+                send_all(client_fd, stop_buf, strlen(stop_buf));
+            }
+            
+            // Update last accessed timestamp
+            metadata_update_last_accessed(ctx->storage_dir, filename);
+            
+            log_info("ss_file_streamed", "file=%s user=%s words=%d", filename, username, word_count);
+            close(client_fd);
+        }
+        // Handle UPDATE_ACL command (from NM)
+        else if (strcmp(cmd_msg.type, "UPDATE_ACL") == 0) {
+            // Payload format: "action=ADD|REMOVE,flag=R|W,filename=FILE,target_user=USER"
+            const char *payload = cmd_msg.payload;
+            
+            // Parse payload
+            char action[16] = {0};  // ADD or REMOVE
+            char flag[16] = {0};    // R or W
+            char filename[256] = {0};
+            char target_user[64] = {0};
+            
+            // Parse: action=ADD,flag=R,filename=test.txt,target_user=bob
+            char *action_start = strstr(payload, "action=");
+            char *flag_start = strstr(payload, "flag=");
+            char *file_start = strstr(payload, "filename=");
+            char *user_start = strstr(payload, "target_user=");
+            
+            if (action_start) {
+                char *action_end = strchr(action_start + 7, ',');
+                if (action_end) {
+                    size_t action_len = action_end - (action_start + 7);
+                    if (action_len < sizeof(action)) {
+                        memcpy(action, action_start + 7, action_len);
+                        action[action_len] = '\0';
+                    }
+                } else {
+                    size_t action_len = strlen(action_start + 7);
+                    if (action_len < sizeof(action)) {
+                        memcpy(action, action_start + 7, action_len);
+                        action[action_len] = '\0';
+                    }
+                }
+            }
+            
+            if (flag_start) {
+                char *flag_end = strchr(flag_start + 5, ',');
+                if (flag_end) {
+                    size_t flag_len = flag_end - (flag_start + 5);
+                    if (flag_len < sizeof(flag)) {
+                        memcpy(flag, flag_start + 5, flag_len);
+                        flag[flag_len] = '\0';
+                    }
+                } else {
+                    size_t flag_len = strlen(flag_start + 5);
+                    if (flag_len < sizeof(flag)) {
+                        memcpy(flag, flag_start + 5, flag_len);
+                        flag[flag_len] = '\0';
+                    }
+                }
+            }
+            
+            if (file_start) {
+                char *file_end = strchr(file_start + 9, ',');
+                if (file_end) {
+                    size_t file_len = file_end - (file_start + 9);
+                    if (file_len < sizeof(filename)) {
+                        memcpy(filename, file_start + 9, file_len);
+                        filename[file_len] = '\0';
+                    }
+                } else {
+                    size_t file_len = strlen(file_start + 9);
+                    if (file_len < sizeof(filename)) {
+                        memcpy(filename, file_start + 9, file_len);
+                        filename[file_len] = '\0';
+                    }
+                }
+            }
+            
+            if (user_start) {
+                size_t user_len = strlen(user_start + 12);
+                if (user_len < sizeof(target_user)) {
+                    memcpy(target_user, user_start + 12, user_len);
+                    target_user[user_len] = '\0';
+                }
+            }
+            
+            log_info("ss_cmd_update_acl", "file=%s action=%s flag=%s target=%s", 
+                     filename, action, flag, target_user);
+            
+            // Load metadata
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "NOT_FOUND", "File not found",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_update_acl_failed", "file=%s reason=not_found", filename);
+                continue;
+            }
+            
+            // Update ACL based on action
+            if (strcmp(action, "ADD") == 0) {
+                if (strcmp(flag, "R") == 0) {
+                    acl_add_read(&meta.acl, target_user);
+                } else if (strcmp(flag, "W") == 0) {
+                    acl_add_write(&meta.acl, target_user);
+                }
+            } else if (strcmp(action, "REMOVE") == 0) {
+                acl_remove(&meta.acl, target_user);
+            }
+            
+            // Save updated metadata
+            if (metadata_save(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "INTERNAL", "Failed to save metadata",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_update_acl_failed", "file=%s reason=save_failed", filename);
+                continue;
+            }
+            
+            // Send ACK
+            Message ack = {0};
+            (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+            (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+            (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+            (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "acl_updated");
+            
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            
+            log_info("ss_acl_updated", "file=%s action=%s target=%s", filename, action, target_user);
+            close(client_fd);
+        }
+        // Handle GET_ACL command (from NM)
+        else if (strcmp(cmd_msg.type, "GET_ACL") == 0) {
+            const char *filename = cmd_msg.payload;
+
+            log_info("ss_cmd_get_acl", "file=%s requester=%s", filename, cmd_msg.username);
+
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "NOT_FOUND", "File not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_get_acl_failed", "file=%s reason=not_found", filename);
+                continue;
+            }
+
+            char acl_buf[4096];
+            if (acl_serialize(&meta.acl, acl_buf, sizeof(acl_buf)) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "INTERNAL", "Failed to serialize ACL",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_get_acl_failed", "file=%s reason=serialize_failed", filename);
+                continue;
+            }
+
+            // Replace newlines with \x01
+            Message acl_msg = {0};
+            (void)snprintf(acl_msg.type, sizeof(acl_msg.type), "%s", "ACL");
+            (void)snprintf(acl_msg.id, sizeof(acl_msg.id), "%s", cmd_msg.id);
+            (void)snprintf(acl_msg.username, sizeof(acl_msg.username), "%s", cmd_msg.username);
+            (void)snprintf(acl_msg.role, sizeof(acl_msg.role), "%s", "SS");
+
+            size_t payload_pos = 0;
+            size_t payload_max = sizeof(acl_msg.payload) - 1;
+            for (size_t i = 0; i < strlen(acl_buf) && payload_pos < payload_max; i++) {
+                if (acl_buf[i] == '\n') {
+                    acl_msg.payload[payload_pos++] = '\x01';
+                } else {
+                    acl_msg.payload[payload_pos++] = acl_buf[i];
+                }
+            }
+            acl_msg.payload[payload_pos] = '\0';
+
+            char acl_line[MAX_LINE];
+            if (proto_format_line(&acl_msg, acl_line, sizeof(acl_line)) == 0) {
+                send_all(client_fd, acl_line, strlen(acl_line));
+            }
+
+            log_info("ss_acl_sent", "file=%s requester=%s", filename, cmd_msg.username);
+            close(client_fd);
         }
         // Unknown command
         else {
@@ -171,9 +602,8 @@ static void *cmd_thread(void *arg) {
                               "INVALID", "Unknown command",
                               error_buf, sizeof(error_buf));
             send_all(client_fd, error_buf, strlen(error_buf));
+            close(client_fd);
         }
-        
-        close(client_fd);
     }
     
     close(server_fd);

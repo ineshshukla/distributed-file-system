@@ -196,6 +196,111 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         return;
     }
     
+    if (strcmp(msg->type, "READ") == 0) {
+        // Filename is directly in payload
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+        
+        log_info("nm_cmd_read", "user=%s file=%s", msg->username, filename);
+        handle_read(fd, msg->username, filename);
+        return;
+    }
+    
+    if (strcmp(msg->type, "STREAM") == 0) {
+        // Filename is directly in payload
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+        
+        log_info("nm_cmd_stream", "user=%s file=%s", msg->username, filename);
+        handle_stream(fd, msg->username, filename);
+        return;
+    }
+    
+    if (strcmp(msg->type, "ADDACCESS") == 0) {
+        // Payload format: "FLAG|filename|username" (e.g., "R|test.txt|bob")
+        char flag[16] = {0};
+        char filename[256] = {0};
+        char target_user[64] = {0};
+        
+        // Parse payload: split by |
+        char payload_copy[512];
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(payload_copy) - 1) ? payload_len : sizeof(payload_copy) - 1;
+        memcpy(payload_copy, msg->payload, copy_len);
+        payload_copy[copy_len] = '\0';
+        char *p = payload_copy;
+        char *flag_end = strchr(p, '|');
+        if (flag_end) {
+            size_t flag_len = flag_end - p;
+            if (flag_len < sizeof(flag)) {
+                memcpy(flag, p, flag_len);
+                flag[flag_len] = '\0';
+            }
+            p = flag_end + 1;
+            
+            char *file_end = strchr(p, '|');
+            if (file_end) {
+                size_t file_len = file_end - p;
+                if (file_len < sizeof(filename)) {
+                    memcpy(filename, p, file_len);
+                    filename[file_len] = '\0';
+                }
+                p = file_end + 1;
+                
+                size_t user_len = strlen(p);
+                if (user_len < sizeof(target_user)) {
+                    memcpy(target_user, p, user_len);
+                    target_user[user_len] = '\0';
+                }
+            }
+        }
+        
+        log_info("nm_cmd_addaccess", "user=%s file=%s target=%s flag=%s", 
+                 msg->username, filename, target_user, flag);
+        handle_addaccess(fd, msg->username, flag, filename, target_user);
+        return;
+    }
+    
+    if (strcmp(msg->type, "REMACCESS") == 0) {
+        // Payload format: "filename|username" (e.g., "test.txt|bob")
+        char filename[256] = {0};
+        char target_user[64] = {0};
+        
+        // Parse payload: split by |
+        char payload_copy[512];
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(payload_copy) - 1) ? payload_len : sizeof(payload_copy) - 1;
+        memcpy(payload_copy, msg->payload, copy_len);
+        payload_copy[copy_len] = '\0';
+        char *p = payload_copy;
+        char *file_end = strchr(p, '|');
+        if (file_end) {
+            size_t file_len = file_end - p;
+            if (file_len < sizeof(filename)) {
+                memcpy(filename, p, file_len);
+                filename[file_len] = '\0';
+            }
+            p = file_end + 1;
+            
+            size_t user_len = strlen(p);
+            if (user_len < sizeof(target_user)) {
+                memcpy(target_user, p, user_len);
+                target_user[user_len] = '\0';
+            }
+        }
+        
+        log_info("nm_cmd_remaccess", "user=%s file=%s target=%s", 
+                 msg->username, filename, target_user);
+        handle_remaccess(fd, msg->username, filename, target_user);
+        return;
+    }
+    
     // Unknown command
     log_error("nm_unknown_msg", "type=%s", msg->type);
     Error err = error_create(ERR_INVALID, "Unknown command: %s", msg->type);

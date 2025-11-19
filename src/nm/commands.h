@@ -91,6 +91,73 @@ int handle_info(int client_fd, const char *username, const char *filename);
 // 3. Sends response to client
 int handle_list(int client_fd, const char *username);
 
+// Handle READ command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client
+// filename: Name of file to read
+// Returns: 0 on success, -1 on error
+//
+// READ command: Returns SS connection info for client to connect directly
+//
+// This function:
+// 1. Looks up file in index (return NOT_FOUND if not exists)
+// 2. Checks read access (return UNAUTHORIZED if no access)
+// 3. Gets SS host and port from file entry
+// 4. Sends SS_INFO message with host=IP,port=PORT
+int handle_read(int client_fd, const char *username, const char *filename);
+
+// Handle STREAM command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client
+// filename: Name of file to stream
+// Returns: 0 on success, -1 on error
+//
+// STREAM command: Returns SS connection info for client to connect directly
+//
+// This function:
+// 1. Looks up file in index (return NOT_FOUND if not exists)
+// 2. Checks read access (return UNAUTHORIZED if no access)
+// 3. Gets SS host and port from file entry
+// 4. Sends SS_INFO message with host=IP,port=PORT
+int handle_stream(int client_fd, const char *username, const char *filename);
+
+// Handle ADDACCESS command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client (must be file owner)
+// flag: "R" for read access, "W" for write access
+// filename: Name of file
+// target_username: Username to grant access to
+// Returns: 0 on success, -1 on error
+//
+// ADDACCESS command: Grants read or write access to a user
+//
+// This function:
+// 1. Looks up file in index (return NOT_FOUND if not exists)
+// 2. Verifies requester is file owner (return UNAUTHORIZED if not)
+// 3. Connects to SS and sends UPDATE_ACL command
+// 4. Waits for ACK from SS
+// 5. Sends success response to client
+int handle_addaccess(int client_fd, const char *username, const char *flag,
+                     const char *filename, const char *target_username);
+
+// Handle REMACCESS command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client (must be file owner)
+// filename: Name of file
+// target_username: Username to remove access from
+// Returns: 0 on success, -1 on error
+//
+// REMACCESS command: Removes all access from a user
+//
+// This function:
+// 1. Looks up file in index (return NOT_FOUND if not exists)
+// 2. Verifies requester is file owner (return UNAUTHORIZED if not)
+// 3. Connects to SS and sends UPDATE_ACL command
+// 4. Waits for ACK from SS
+// 5. Sends success response to client
+int handle_remaccess(int client_fd, const char *username,
+                     const char *filename, const char *target_username);
+
 // Helper: Send error response to client
 // client_fd: File descriptor
 // id: Message ID
