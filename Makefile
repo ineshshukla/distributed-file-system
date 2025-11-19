@@ -26,4 +26,6 @@ clean:
 re:
 	make clean
 	make all
+
+test: re
 	./run_all.sh
