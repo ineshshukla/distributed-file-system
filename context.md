@@ -280,20 +280,36 @@ ERROR [CONFLICT]: File 'test2.txt' already exists
 
 **See `PHASE_PLAN.md` for detailed implementation plan of remaining work.**
 
-### Remaining Work Summary (100 marks)
-1. **Phase 3**: READ, STREAM, Access Control Commands (40 marks)
-2. **Phase 4**: WRITE Command with sentence locking (30 marks) - Most complex
-3. **Phase 5**: UNDO Command (15 marks) - Depends on Phase 4
-4. **Phase 6**: EXEC Command (15 marks)
+### Remaining Work Summary (60 marks)
+1. **Phase 4**: WRITE Command with sentence locking (30 marks) - Most complex
+2. **Phase 5**: UNDO Command (15 marks) - Depends on Phase 4
+3. **Phase 6**: EXEC Command (15 marks)
 
-**Current Status**: Phase 1 & 2 complete (95 marks). Remaining: 100 marks.
+**Current Status**: Phases 1–3 complete (135 marks). Remaining: 60 marks.
+
+#### Phase 3 coverage (✅)
+- Client↔NM↔SS READ & STREAM path with newline/word streaming, STOP packets
+- ACL pulled from SS (`GET_ACL`) before allowing READ/STREAM/ADD/REM
+- ADDACCESS / REMACCESS update ACL atomically on SS, applied immediately to users
+- Manual end-to-end tests recorded in logs / sample runs
+- Build clean with `-Werror`
 
 ### Known Limitations
 1. **File Owner on SS Registration**: Files scanned during SS registration show owner=ss1 (placeholder) because metadata isn't loaded during registration. Owner is updated when a user creates/accesses the file. Use `VIEW -a` to see all files including those with placeholder owners.
-2. **ACL Checking**: Currently simplified - only checks owner for DELETE/INFO. Full ACL checking would require loading metadata from SS on every operation.
+2. **DELETE/INFO ACL**: Still check only owner; needs metadata fetch similar to READ/STREAM path.
 3. **SS Selection**: Uses first available SS (round-robin not fully implemented)
 4. **File Content**: Files are created empty - no content writing yet
 5. **Metadata Updates**: Word/char counts not updated when files are modified
+
+### WRITE (Phase 4) Locking Strategy
+- **Sentence IDs**: Each sentence will carry a stable, unique ID stored in metadata. Locks reference sentence IDs, not just indices.
+- **Lock semantics**: A WRITE session locks one sentence ID; no other session can lock the same ID until `ETIRW`.
+- **In-session edits**: Splitting a sentence (due to new delimiters) assigns new IDs to the newly created sentences but does not affect other locked sentences.
+- **Commit flow**:
+  1. Reload latest file/sentence list right before commit.
+  2. Locate target sentence(s) by ID, regardless of index shifts.
+  3. Splice in updated content, write to `.tmp`, rename atomically.
+- **Result**: Concurrent WRITEs on different sentences never conflict, even if earlier writes change sentence counts; no “last-write wins” discard needed.
 
 ## Troubleshooting
 

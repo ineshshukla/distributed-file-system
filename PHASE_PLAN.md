@@ -169,8 +169,9 @@
    ```
 
 3. **SS**: Load/save file content as sentences
+   - Store persistent metadata per sentence (unique `sentence_id`, timestamps)
    - Convert file text → sentences on load
-   - Convert sentences → file text on save
+   - Convert sentences → file text on save while preserving IDs
 
 **Testing**:
 - [ ] Parse empty file
@@ -184,8 +185,8 @@
 
 **Tasks**:
 1. **SS**: Implement sentence lock manager
-   - Per-file lock table (sentence index → lock info)
-   - Lock structure: `{sentence_idx, locked_by_username, lock_time}`
+   - Per-file lock table keyed by `sentence_id` (not mutable index)
+   - Lock structure: `{sentence_id, locked_by_username, lock_time}`
    - Thread-safe locking (mutex per file or global)
 
 2. **SS**: Lock/unlock functions
@@ -217,7 +218,7 @@
    - Return SS connection info
 
 3. **SS**: Handle WRITE command
-   - Lock sentence (return error if locked)
+   - Lock sentence ID (return error if locked)
    - Wait for word updates
    - Apply updates to sentence
    - Handle sentence delimiter creation (`.`, `!`, `?` in content)
@@ -242,8 +243,8 @@
 
 2. **SS**: Sentence delimiter detection
    - When content contains `.`, `!`, `?` → split into new sentences
-   - Update sentence indices after split
-   - Maintain active sentence index for subsequent updates
+   - Assign new unique `sentence_id` to any newly created sentences
+   - Maintain mapping from locked `sentence_id` to current index for subsequent updates
 
 3. **SS**: Atomic swap pattern for concurrent read/write
    - **During WRITE**: Work on temporary file (`files/<filename>.tmp`)
@@ -289,7 +290,7 @@
    - Release lock on ETIRW or error
    - Handle client disconnection (unlock on timeout)
 
-3. **SS**: Concurrent read/write with atomic swap
+3. **SS**: Concurrent read/write with atomic swap + sentence IDs
    - **READ/STREAM during WRITE**: 
      - Readers continue reading original file (old inode)
      - WRITE works on `.tmp` file
@@ -297,10 +298,10 @@
      - Readers see consistent snapshot (old version until they reconnect)
      - New readers see new version
    - **Multiple WRITEs to different sentences**:
-     - Each WRITE locks its sentence
-     - Each WRITE works on its own `.tmp` file
-     - Last WRITE to complete wins (atomic rename)
-     - Alternative: Merge changes if no conflicts
+     - Each WRITE locks specific `sentence_id`
+     - Each WRITE works on its own `.tmp` based on current snapshot
+     - On commit, reload latest file, locate sentences by ID, splice updates
+     - No last-write-wins discard required; disjoint sentence edits merge cleanly
 
 **Testing**:
 - [ ] Two users write to different sentences simultaneously
