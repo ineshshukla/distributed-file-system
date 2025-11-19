@@ -21,6 +21,7 @@ static char g_username[64] = {0};
 static int handle_ss_command(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 static int perform_undo_command(const ParsedCommand *cmd, const char *ss_host, int ss_port);
+static void print_payload_with_newlines(const char *payload);
 
 // Send command to NM and receive response
 // Returns: 0 on success, -1 on error
@@ -79,27 +80,28 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
         }
         fflush(stdout);
     } else if (strcmp(resp.type, "DATA") == 0) {
-        // Data response (for VIEW, LIST, INFO, etc.)
-        // Payload contains the actual data
-        // Convert \x01 (SOH) back to \n (newline) - these were escaped to avoid breaking the line-based protocol
-        if (strlen(resp.payload) > 0) {
-            // Convert \x01 back to \n
-            char *p = resp.payload;
-            while (*p) {
-                if (*p == '\x01') {
-                    putchar('\n');
-                } else {
-                    putchar(*p);
+        print_payload_with_newlines(resp.payload);
+        if (strcmp(cmd->cmd, "EXEC") == 0) {
+            while (1) {
+                int n = recv_line(g_nm_fd, resp_buf, sizeof(resp_buf));
+                if (n <= 0) break;
+                if (proto_parse_line(resp_buf, &resp) != 0) break;
+                if (strcmp(resp.type, "STOP") == 0) {
+                    break;
+                } else if (strcmp(resp.type, "DATA") == 0) {
+                    print_payload_with_newlines(resp.payload);
+                } else if (strcmp(resp.type, "ERROR") == 0) {
+                    char error_code[64];
+                    char error_msg[256];
+                    if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                                          error_msg, sizeof(error_msg)) == 0) {
+                        printf("ERROR [%s]: %s\n", error_code, error_msg);
+                    } else {
+                        printf("ERROR: %s\n", resp.payload);
+                    }
+                    break;
                 }
-                p++;
             }
-            // If payload doesn't end with newline, add one
-            if (resp.payload[strlen(resp.payload) - 1] != '\x01' && resp.payload[strlen(resp.payload) - 1] != '\n') {
-                printf("\n");
-            }
-        } else {
-            // Empty data response - at least print something
-            printf("(No data)\n");
         }
         fflush(stdout);
     } else if (strcmp(resp.type, "SS_INFO") == 0) {

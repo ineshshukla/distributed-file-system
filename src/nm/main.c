@@ -266,6 +266,18 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         return;
     }
 
+    if (strcmp(msg->type, "EXEC") == 0) {
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+
+        log_info("nm_cmd_exec", "user=%s file=%s", msg->username, filename);
+        handle_exec(fd, msg->username, filename, msg->id);
+        return;
+    }
+
     if (strcmp(msg->type, "WRITE") == 0) {
         char filename[256] = {0};
         int sentence_index = 0;

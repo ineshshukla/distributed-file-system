@@ -536,6 +536,57 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
             close(client_fd);
             return;
         }
+        else if (strcmp(cmd_msg.type, "GET_FILE") == 0) {
+            const char *filename = cmd_msg.payload;
+
+            char content[65536];
+            size_t actual_size = 0;
+            if (file_read(ctx->storage_dir, filename, content, sizeof(content), &actual_size) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "NOT_FOUND", "File not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+
+            size_t content_pos = 0;
+            while (content_pos < actual_size) {
+                Message data_msg = {0};
+                (void)snprintf(data_msg.type, sizeof(data_msg.type), "%s", "DATA");
+                (void)snprintf(data_msg.id, sizeof(data_msg.id), "%s", cmd_msg.id);
+                (void)snprintf(data_msg.username, sizeof(data_msg.username), "%s", cmd_msg.username);
+                (void)snprintf(data_msg.role, sizeof(data_msg.role), "%s", "SS");
+
+                size_t payload_pos = 0;
+                size_t payload_max = sizeof(data_msg.payload) - 1;
+                while (content_pos < actual_size && payload_pos < payload_max) {
+                    char c = content[content_pos++];
+                    data_msg.payload[payload_pos++] = (c == '\n') ? '\x01' : c;
+                }
+                data_msg.payload[payload_pos] = '\0';
+
+                char data_buf[MAX_LINE];
+                if (proto_format_line(&data_msg, data_buf, sizeof(data_buf)) == 0) {
+                    send_all(client_fd, data_buf, strlen(data_buf));
+                }
+            }
+
+            Message stop_msg = {0};
+            (void)snprintf(stop_msg.type, sizeof(stop_msg.type), "%s", "STOP");
+            (void)snprintf(stop_msg.id, sizeof(stop_msg.id), "%s", cmd_msg.id);
+            (void)snprintf(stop_msg.username, sizeof(stop_msg.username), "%s", cmd_msg.username);
+            (void)snprintf(stop_msg.role, sizeof(stop_msg.role), "%s", "SS");
+            stop_msg.payload[0] = '\0';
+
+            char stop_buf[MAX_LINE];
+            if (proto_format_line(&stop_msg, stop_buf, sizeof(stop_buf)) == 0) {
+                send_all(client_fd, stop_buf, strlen(stop_buf));
+            }
+            close(client_fd);
+            return;
+        }
         // Handle WRITE command
         else if (strcmp(cmd_msg.type, "WRITE") == 0) {
             char filename[256] = {0};

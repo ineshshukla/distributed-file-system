@@ -122,6 +122,7 @@ int handle_read(int client_fd, const char *username, const char *filename);
 int handle_stream(int client_fd, const char *username, const char *filename);
 
 int handle_undo(int client_fd, const char *username, const char *filename);
+int handle_exec(int client_fd, const char *username, const char *filename, const char *request_id);
 
 // Handle WRITE command - returns SS info after checking write access
 int handle_write(int client_fd, const char *username, const char *filename, int sentence_index);

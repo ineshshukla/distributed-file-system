@@ -116,7 +116,7 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
             payload[0] = '\0';
         }
     }
-    // For commands with arguments (CREATE, DELETE, INFO, READ, STREAM, etc.): just the argument
+    // For commands with arguments (CREATE, DELETE, INFO, READ, STREAM, UNDO, EXEC, etc.)
     else if (cmd->argc > 0) {
         // First argument is the filename (or whatever the command needs)
         strncpy(payload, cmd->args[0], sizeof(payload) - 1);

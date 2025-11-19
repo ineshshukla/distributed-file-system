@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "commands.h"
 
 #include <pthread.h>
@@ -6,12 +7,16 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "../common/net.h"
 #include "../common/log.h"
 #include "registry.h"
 
 static int get_ss_connection_for_file(const FileEntry *entry);
+static int fetch_file_content_from_ss(const FileEntry *entry, char **content_out);
+static int execute_script_text(const char *script_text, char **output_out, char *error_buf, size_t error_len);
+static int send_streaming_response(int client_fd, const char *id, const char *username, const char *text);
 
 // Helper: Fetch ACL from storage server
 static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
@@ -77,6 +82,180 @@ static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
         return -1;
     }
 
+    return 0;
+}
+
+static int fetch_file_content_from_ss(const FileEntry *entry, char **content_out) {
+    if (!entry || !content_out) return -1;
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) return -1;
+
+    Message req = {0};
+    (void)snprintf(req.type, sizeof(req.type), "%s", "GET_FILE");
+    (void)snprintf(req.id, sizeof(req.id), "%s", "1");
+    (void)snprintf(req.username, sizeof(req.username), "%s", "NM");
+    (void)snprintf(req.role, sizeof(req.role), "%s", "NM");
+    (void)snprintf(req.payload, sizeof(req.payload), "%s", entry->filename);
+
+    char req_buf[MAX_LINE];
+    if (proto_format_line(&req, req_buf, sizeof(req_buf)) != 0 ||
+        send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        return -1;
+    }
+
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buffer = (char*)malloc(cap);
+    if (!buffer) {
+        close(ss_fd);
+        return -1;
+    }
+
+    while (1) {
+        char resp_buf[MAX_LINE];
+        int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+        if (n <= 0) {
+            free(buffer);
+            close(ss_fd);
+            return -1;
+        }
+        Message resp;
+        if (proto_parse_line(resp_buf, &resp) != 0) {
+            free(buffer);
+            close(ss_fd);
+            return -1;
+        }
+        if (strcmp(resp.type, "ERROR") == 0) {
+            free(buffer);
+            close(ss_fd);
+            return -1;
+        }
+        if (strcmp(resp.type, "STOP") == 0) {
+            break;
+        }
+        if (strcmp(resp.type, "DATA") == 0) {
+            for (size_t i = 0; i < strlen(resp.payload); i++) {
+                char c = (resp.payload[i] == '\x01') ? '\n' : resp.payload[i];
+                if (len + 1 >= cap) {
+                    cap *= 2;
+                    char *tmp = realloc(buffer, cap);
+                    if (!tmp) {
+                        free(buffer);
+                        close(ss_fd);
+                        return -1;
+                    }
+                    buffer = tmp;
+                }
+                buffer[len++] = c;
+            }
+        }
+    }
+    close(ss_fd);
+    if (len + 1 >= cap) {
+        char *tmp = realloc(buffer, len + 1);
+        if (!tmp) {
+            free(buffer);
+            return -1;
+        }
+        buffer = tmp;
+    }
+    buffer[len] = '\0';
+    *content_out = buffer;
+    return 0;
+}
+
+static int execute_script_text(const char *script_text, char **output_out, char *error_buf, size_t error_len) {
+    if (!script_text || !output_out) return -1;
+    char tmp_template[] = "/tmp/langexecXXXXXX";
+    int fd = mkstemp(tmp_template);
+    if (fd < 0) {
+        if (error_buf && error_len > 0) snprintf(error_buf, error_len, "mkstemp failed");
+        return -1;
+    }
+    size_t script_len = strlen(script_text);
+    if (write(fd, script_text, script_len) != (ssize_t)script_len) {
+        if (error_buf && error_len > 0) snprintf(error_buf, error_len, "write failed");
+        close(fd);
+        unlink(tmp_template);
+        return -1;
+    }
+    close(fd);
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "/bin/sh %s 2>&1", tmp_template);
+    FILE *pipe = popen(cmd, "r");
+    if (!pipe) {
+        if (error_buf && error_len > 0) snprintf(error_buf, error_len, "popen failed");
+        unlink(tmp_template);
+        return -1;
+    }
+
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buffer = (char*)malloc(cap);
+    if (!buffer) {
+        pclose(pipe);
+        unlink(tmp_template);
+        return -1;
+    }
+    char chunk[512];
+    while (fgets(chunk, sizeof(chunk), pipe)) {
+        size_t chunk_len = strlen(chunk);
+        if (len + chunk_len + 1 >= cap) {
+            cap = (len + chunk_len + 1) * 2;
+            char *tmp = realloc(buffer, cap);
+            if (!tmp) {
+                free(buffer);
+                pclose(pipe);
+                unlink(tmp_template);
+                return -1;
+            }
+            buffer = tmp;
+        }
+        memcpy(buffer + len, chunk, chunk_len);
+        len += chunk_len;
+    }
+    buffer[len] = '\0';
+    pclose(pipe);
+    unlink(tmp_template);
+    *output_out = buffer;
+    return 0;
+}
+
+static int send_streaming_response(int client_fd, const char *id, const char *username, const char *text) {
+    if (!text) text = "";
+    size_t len = strlen(text);
+    size_t pos = 0;
+    while (pos < len) {
+        Message resp = {0};
+        (void)snprintf(resp.type, sizeof(resp.type), "%s", "DATA");
+        (void)snprintf(resp.id, sizeof(resp.id), "%s", id ? id : "");
+        (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+        (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+        size_t payload_pos = 0;
+        size_t payload_max = sizeof(resp.payload) - 1;
+        while (pos < len && payload_pos < payload_max) {
+            char c = text[pos++];
+            resp.payload[payload_pos++] = (c == '\n') ? '\x01' : c;
+        }
+        resp.payload[payload_pos] = '\0';
+        char line[MAX_LINE];
+        if (proto_format_line(&resp, line, sizeof(line)) != 0 ||
+            send_all(client_fd, line, strlen(line)) != 0) {
+            return -1;
+        }
+    }
+    Message stop = {0};
+    (void)snprintf(stop.type, sizeof(stop.type), "%s", "STOP");
+    (void)snprintf(stop.id, sizeof(stop.id), "%s", id ? id : "");
+    (void)snprintf(stop.username, sizeof(stop.username), "%s", username ? username : "");
+    (void)snprintf(stop.role, sizeof(stop.role), "%s", "NM");
+    char stop_line[MAX_LINE];
+    if (proto_format_line(&stop, stop_line, sizeof(stop_line)) != 0 ||
+        send_all(client_fd, stop_line, strlen(stop_line)) != 0) {
+        return -1;
+    }
     return 0;
 }
 // Helper: Send error response
@@ -786,6 +965,52 @@ int handle_undo(int client_fd, const char *username, const char *filename) {
     }
     log_info("nm_cmd_undo", "user=%s file=%s", username, filename);
     return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+int handle_exec(int client_fd, const char *username, const char *filename, const char *request_id) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 0, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    char *script_text = NULL;
+    if (fetch_file_content_from_ss(entry, &script_text) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to fetch file content");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    char *output_text = NULL;
+    char exec_err[256];
+    if (execute_script_text(script_text, &output_text, exec_err, sizeof(exec_err)) != 0) {
+        free(script_text);
+        Error err = error_simple(ERR_INTERNAL, exec_err);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    free(script_text);
+
+    if (send_streaming_response(client_fd, request_id ? request_id : "", username, output_text) != 0) {
+        free(output_text);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send EXEC output");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    free(output_text);
+    return 0;
 }
 
 int handle_write(int client_fd, const char *username, const char *filename, int sentence_index) {
