@@ -1,9 +1,8 @@
 - addaccess doesnt seem to be working at all - it worked when i created a new user, a new file, adn then added access to an old user, but not when i did it the other way around
-- Issues with adding access while the users are already present on server - the list doesnt get updated
-- `-rw` doesnt seem to be implemented I think, which can be okay but success message should definitely not be given for it - maybe it is, and there is a more general issue with addacces
-- addaccess to unknown user is also being allowed-poor design choice
+- `-RW` doesnt seem to be implemented I think, which can be okay but success message should definitely not be given for it
+- addaccess to unknown user is also being allowed(which btw works once the user is created)-just a poor design choice
 - In addaccess, when username not given -still shows `file '' not found` error, instead of `username '' not found`  
-- `-W` gives read access as well (also shows current sentence when writing-which can be a design choice)
+- `-W` gives read access as well (also shows current sentence when writing(sortof read)-which can be a design choice)
   
 - dynamically update size of table formed at `view -al` based on largest filename
 - add `help` functionality for all commands and usage (interface)
