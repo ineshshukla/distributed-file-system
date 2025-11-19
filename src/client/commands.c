@@ -107,6 +107,15 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
             payload[0] = '\0';
         }
     }
+    else if (strcmp(cmd->cmd, "WRITE") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';
+        }
+    }
     // For commands with arguments (CREATE, DELETE, INFO, READ, STREAM, etc.): just the argument
     else if (cmd->argc > 0) {
         // First argument is the filename (or whatever the command needs)

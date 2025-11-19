@@ -221,6 +221,32 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         handle_stream(fd, msg->username, filename);
         return;
     }
+
+    if (strcmp(msg->type, "WRITE") == 0) {
+        char filename[256] = {0};
+        int sentence_index = 0;
+        if (strlen(msg->payload) > 0) {
+            char payload_copy[512];
+            size_t payload_len = strlen(msg->payload);
+            size_t copy_len = (payload_len < sizeof(payload_copy) - 1) ? payload_len : sizeof(payload_copy) - 1;
+            memcpy(payload_copy, msg->payload, copy_len);
+            payload_copy[copy_len] = '\0';
+            char *sep = strchr(payload_copy, '|');
+            if (sep) {
+                *sep = '\0';
+                sentence_index = atoi(sep + 1);
+            }
+            size_t fn_len = strlen(payload_copy);
+            size_t fn_copy = (fn_len < sizeof(filename) - 1) ? fn_len : sizeof(filename) - 1;
+            memcpy(filename, payload_copy, fn_copy);
+            filename[fn_copy] = '\0';
+        }
+        
+        log_info("nm_cmd_write", "user=%s file=%s sentence=%d",
+                 msg->username, filename, sentence_index);
+        handle_write(fd, msg->username, filename, sentence_index);
+        return;
+    }
     
     if (strcmp(msg->type, "ADDACCESS") == 0) {
         // Payload format: "FLAG|filename|username" (e.g., "R|test.txt|bob")

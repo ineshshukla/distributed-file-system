@@ -2,7 +2,7 @@
 
 ## Current Status
 
-### ✅ Implemented (Phase 1–3)
+### ✅ Implemented (Phase 1–4)
 - **VIEW** (with -a, -l flags) - 10 marks
 - **CREATE** - 10 marks
 - **DELETE** - 10 marks
@@ -11,15 +11,15 @@
 - **READ** (client↔SS data path + ACL enforcement) - 10 marks
 - **STREAM** (word-by-word with delay) - 15 marks
 - **ADDACCESS / REMACCESS** (owner-managed ACL updates) - 15 marks
+- **WRITE** (sentence parsing, locking, client→NM→SS interactive flow) - 30 marks
 - **System Requirements**: Data Persistence, Logging, Error Handling, Efficient Search - 35 marks
 - **Specifications**: Initialization, NM, SS, Client - 10 marks
 
-**Total Completed: 135 marks**
+**Total Completed: 165 marks**
 
-### ❌ Remaining (60 marks)
-1. **WRITE** - 30 marks (most complex)
-2. **UNDO** - 15 marks (depends on WRITE)
-3. **EXEC** - 15 marks
+### ❌ Remaining (30 marks)
+1. **UNDO** - 15 marks (depends on WRITE)
+2. **EXEC** - 15 marks
 
 ---
 
@@ -144,7 +144,7 @@
 ## Phase 4: WRITE Command (Sentence-Level Editing)
 **Goal**: Implement word-level file editing with sentence locking
 
-### Step 1: Sentence Parsing & Data Structures
+### Step 1: Sentence Parsing & Data Structures ✅
 **What**: Parse files into sentences and words, manage sentence structure
 
 **Tasks**:
@@ -154,40 +154,62 @@
    - Handle edge cases: `e.g.`, `Umm... ackchually!`
    - Reconstruct file from sentences
 
-2. **SS**: Create sentence data structure
+2. **SS**: Create sentence & runtime data structures
    ```c
    typedef struct {
-       char **words;      // Array of word strings
-       int word_count;    // Number of words
-       int locked_by;     // User ID or -1 if unlocked
+       char **words;       // Array of word strings
+       int   word_count;   // Number of words
+       int   sentence_id;  // Stable ID persisted in metadata
+       int   version;      // Incremented each time this sentence is modified
    } Sentence;
    
    typedef struct {
        Sentence *sentences;
-       int sentence_count;
+       int        sentence_count;
    } FileContent;
+   
+   typedef struct {
+       int  sentence_id;
+       char locked_by[64];
+       time_t lock_time;
+       int  session_id;        // identifies the WRITE session holding the lock
+   } SentenceLock;
+   
+   typedef struct {
+       char filename[MAX_FILENAME];
+       pthread_mutex_t lock_mu;          // protects this runtime structure
+       SentenceLock locks[MAX_SENTENCES]; // active locks keyed by sentence_id
+       int lock_count;
+   } FileRuntimeState;
    ```
 
 3. **SS**: Load/save file content as sentences
-   - Store persistent metadata per sentence (unique `sentence_id`, timestamps)
-   - Convert file text → sentences on load
-   - Convert sentences → file text on save while preserving IDs
+   - Extend `<filename>.meta` to include per-sentence records, e.g.:
+     ```
+     SENTENCE_COUNT=N
+     SENTENCE_0=id|word_count|char_count|offset
+     ...
+     ```
+   - Store `sentence_id` + version per sentence; ensure IDs survive restarts.
+   - Convert file text → sentences on load; rebuild `FileRuntimeState` lazily when a file is first accessed.
+   - Convert sentences → file text on save while preserving IDs; update metadata atomically.
 
-**Testing**:
-- [ ] Parse empty file
-- [ ] Parse file with one sentence
-- [ ] Parse file with multiple sentences
-- [ ] Parse file with delimiters in words (`e.g.`, `Umm...`)
-- [ ] Reconstruct file from sentences
+**Testing (✅ Completed)**:
+- [x] Parse empty file (ensures zero-word files still yield a sentinel sentence)
+- [x] Parse file with one sentence
+- [x] Parse file with multiple sentences
+- [x] Parse file with delimiters in words (`e.g.`, punctuation mid-word)
+- [x] Reconstruct file from sentences and persist metadata
 
-### Step 2: Sentence Locking Mechanism
+### Step 2: Sentence Locking Mechanism ✅
 **What**: Lock sentences during WRITE operations
 
 **Tasks**:
 1. **SS**: Implement sentence lock manager
-   - Per-file lock table keyed by `sentence_id` (not mutable index)
-   - Lock structure: `{sentence_id, locked_by_username, lock_time}`
-   - Thread-safe locking (mutex per file or global)
+   - Per-file runtime lock table keyed by `sentence_id` (not mutable index)
+   - Lock structure: `{sentence_id, locked_by_username, lock_time, session_id}`
+   - Thread-safe locking via `FileRuntimeState.lock_mu`
+   - Rebuild runtime lock table on demand (when file first touched after restart).
 
 2. **SS**: Lock/unlock functions
    - `sentence_lock(filename, sentence_idx, username)` - returns 0 if locked, -1 if already locked
@@ -197,14 +219,14 @@
 3. **SS**: Handle lock timeout (optional, for robustness)
    - Auto-unlock after timeout (e.g., 5 minutes)
 
-**Testing**:
-- [ ] Lock sentence successfully
-- [ ] Lock already-locked sentence (error)
-- [ ] Unlock sentence
-- [ ] Multiple users lock different sentences
-- [ ] Lock timeout (if implemented)
+**Testing (✅ Completed)**:
+- [x] Lock sentence successfully (WRITE acquires lock per sentence_id)
+- [x] Lock already-locked sentence (client receives “locked by another writer”)
+- [x] Unlock sentence on ETIRW / abort
+- [x] Multiple users lock different sentences (split sentence test)
+- [ ] Lock timeout (watchdog hook present, not exercised yet)
 
-### Step 3: WRITE Command - Basic Flow
+### Step 3: WRITE Command - Basic Flow ✅
 **What**: WRITE command with sentence locking
 
 **Tasks**:
@@ -224,14 +246,14 @@
    - Handle sentence delimiter creation (`.`, `!`, `?` in content)
    - Unlock on `ETIRW`
 
-**Testing**:
-- [ ] WRITE to empty file (sentence 0)
-- [ ] WRITE to existing sentence
-- [ ] WRITE to locked sentence (error)
-- [ ] Multiple word updates in one WRITE
-- [ ] ETIRW unlocks sentence
+**Testing (✅ Completed)**:
+- [x] WRITE to empty file (sentence 0)
+- [x] WRITE to existing sentence
+- [x] WRITE to locked sentence (error surfaced to second client)
+- [x] Multiple word updates in one WRITE session
+- [x] ETIRW unlocks sentence and commits changes atomically
 
-### Step 4: Word-Level Updates & Sentence Splitting
+### Step 4: Word-Level Updates & Sentence Splitting ✅
 **What**: Implement word insertion/update logic and handle sentence delimiters
 
 **Tasks**:
@@ -243,47 +265,40 @@
 
 2. **SS**: Sentence delimiter detection
    - When content contains `.`, `!`, `?` → split into new sentences
-   - Assign new unique `sentence_id` to any newly created sentences
+   - Assign new unique `sentence_id` to any newly created sentences (monotonic counter stored in metadata)
    - Maintain mapping from locked `sentence_id` to current index for subsequent updates
+   - Persist updated `sentence_id` metadata during commit so future sessions re-map correctly.
 
 3. **SS**: Atomic swap pattern for concurrent read/write
-   - **During WRITE**: Work on temporary file (`files/<filename>.tmp`)
-     - Load current file content into memory (sentences structure)
-     - Apply all word updates to in-memory structure
-     - Write updated content to `files/<filename>.tmp`
-   - **On ETIRW**: Atomically replace original file
-     - `rename("files/<filename>.tmp", "files/<filename>")` (atomic operation)
-     - Update metadata (word/char counts, last_modified)
-     - Unlock sentence
-   - **How it works with concurrent reads**:
-     - **Unix inode behavior**: `rename()` only changes the directory entry, not the inode
-     - Open file descriptors keep the old inode alive until closed
-     - READ: Reads entire file quickly, closes immediately (unlikely overlap)
-     - STREAM: Keeps file open during streaming; old inode persists until `fclose()`
-     - Result: Readers see consistent snapshot (version when they opened)
-   - **Benefits**:
-     - Concurrent READ/STREAM operations continue reading original file (consistent snapshot)
-     - No blocking of readers during write
-     - Atomic replacement ensures no corruption
-     - Matches requirements hint: "write to a temporary swap file initially, and move the contents to the final file once all updates are complete"
+   - **During WRITE**: Work on temporary file (`files/<filename>.<session>.tmp`)
+     - Load current file content + metadata into memory
+     - Apply all word updates to the locked sentence IDs
+     - Update sentence versions / metadata in-memory
+     - Write updated file and metadata to temp location
+   - **On ETIRW**: Commit sequence
+     1. Re-parse latest on-disk metadata to ensure IDs map correctly.
+     2. Merge in-memory sentence changes by ID (skip others).
+     3. Write merged content to new `.tmp`, fsync, rename into place.
+     4. Remove per-session temp artifacts, unlock sentence IDs.
+   - **How it works with concurrent reads** (unchanged inode semantics).
 
-**Testing**:
-- [ ] Insert word at index 0
-- [ ] Insert word at middle index
-- [ ] Insert word at end (append)
-- [ ] Insert word with delimiter (sentence split)
-- [ ] Multiple updates in sequence
-- [ ] Invalid index (error)
-- [ ] Atomic write (verify no corruption)
+**Testing (✅ Completed)**:
+- [x] Insert word at index 0 (prepend text)
+- [x] Insert at middle / end via multiple edits
+- [x] Insert punctuation to force new sentence creation (split + new IDs)
+- [x] Multiple updates in sequence within a single session
+- [x] Invalid index rejected with error
+- [x] Atomic write verified via READ/STREAM during/after WRITE (inode swap semantics)
 
-### Step 5: Concurrent WRITE Handling
+### Step 5: Concurrent WRITE Handling ✅ (initial pass)
 **What**: Ensure multiple users can write to different sentences simultaneously
 
 **Tasks**:
 1. **SS**: Multi-threaded command handler
-   - Thread pool or per-connection thread for client commands
-   - Each WRITE operation in separate thread
-   - File-level mutex for metadata updates
+   - Dedicated acceptor thread pushes new sockets into a bounded queue (drop or back-pressure when full; default size configurable)
+   - Fixed-size worker thread pool (configurable via CLI/env, default e.g. 8) pulls requests and processes them
+   - Each READ/STREAM/WRITE/ACL/GET_ACL request runs on a worker; long-running WRITEs no longer block accept loop
+   - Workers coordinate through per-file `lock_mu` and runtime state when touching lock tables / metadata
 
 2. **SS**: Lock coordination
    - Check lock before acquiring
@@ -291,35 +306,32 @@
    - Handle client disconnection (unlock on timeout)
 
 3. **SS**: Concurrent read/write with atomic swap + sentence IDs
-   - **READ/STREAM during WRITE**: 
-     - Readers continue reading original file (old inode)
-     - WRITE works on `.tmp` file
-     - When WRITE completes, `rename()` atomically replaces file
-     - Readers see consistent snapshot (old version until they reconnect)
-     - New readers see new version
+   - **READ/STREAM during WRITE**: same as Step 4 (inode semantics)
    - **Multiple WRITEs to different sentences**:
-     - Each WRITE locks specific `sentence_id`
-     - Each WRITE works on its own `.tmp` based on current snapshot
-     - On commit, reload latest file, locate sentences by ID, splice updates
-     - No last-write-wins discard required; disjoint sentence edits merge cleanly
+     - Each WRITE locks specific `sentence_id`; workers refuse duplicate locks
+     - Each session maintains its own temp state; on commit we reload latest metadata, merge by ID, then rename
+     - No last-write-wins discard required; disjoint sentence edits merge cleanly even if earlier commits changed indices
+   - **Failure / cleanup**:
+     - If worker crashes or client disconnects before ETIRW, release lock, delete session temp files, roll back partial metadata changes
+     - Background watchdog clears stale locks past timeout to avoid deadlocks
 
 **Testing**:
-- [ ] Two users write to different sentences simultaneously
-- [ ] Two users try to write to same sentence (one blocked)
-- [ ] Client disconnects mid-WRITE (lock released)
-- [ ] Multiple concurrent WRITEs to different files
-- [ ] READ/STREAM during active WRITE (sees old version, no corruption)
-- [ ] READ after WRITE completes (sees new version)
+- [ ] Two users write to different sentences simultaneously (to run)
+- [x] Two users try to write to same sentence (second client blocked with lock error)
+- [ ] Client disconnects mid-WRITE (lock released) – to be exercised
+- [ ] Multiple concurrent WRITEs to different files – to be exercised
+- [x] READ/STREAM during active WRITE (manual snapshots show consistent output)
+- [x] READ after WRITE completes (verified in timeline)
 
 **Verification Checklist**:
-- [ ] WRITE command works end-to-end
-- [ ] Sentence locking prevents concurrent edits
-- [ ] Word updates work correctly
-- [ ] Sentence delimiters create new sentences
-- [ ] Atomic writes prevent corruption
-- [ ] Concurrent WRITEs to different sentences work
-- [ ] No compiler warnings
-- [ ] Manual test runs documented (all examples from requirements)
+- [x] WRITE command works end-to-end (client↔NM↔SS)
+- [x] Sentence locking prevents concurrent edits on same sentence
+- [x] Word updates work correctly (insert/append/multi-edit)
+- [x] Sentence delimiters create new sentences with stable IDs
+- [x] Atomic writes prevent corruption (READ/STREAM snapshots)
+- [ ] Concurrent WRITEs to different sentences (need dedicated test run)
+- [x] No compiler warnings (`make` with `-Werror`)
+- [x] Manual test runs documented (logs + timeline in `nm.log` / `ss.log`)
 
 ---
 
@@ -420,10 +432,10 @@
 - **Estimated Time**: 2-3 days
 - **Dependencies**: None
 
-### Phase 4: WRITE Command (30 marks)
+### Phase 4: WRITE Command (30 marks) ✅
 - Sentence parsing, locking, word updates
-- **Estimated Time**: 4-5 days (most complex)
-- **Dependencies**: None (but needed for UNDO)
+- **Actual Outcome**: Completed with interactive client workflow, sentence-level locking, SS worker pool, and metadata persistence. Additional stress/concurrency tests queued.
+- **Dependencies**: None (unblocks Phase 5)
 
 ### Phase 5: UNDO Command (15 marks)
 - Change tracking and restoration
@@ -435,8 +447,8 @@
 - **Estimated Time**: 1 day
 - **Dependencies**: None
 
-**Total Remaining: 100 marks**
-**Total Estimated Time: 8-11 days**
+**Total Remaining: 70 marks**
+**Updated Estimate: 4-6 days (Phase 5–6)**
 
 ---
 

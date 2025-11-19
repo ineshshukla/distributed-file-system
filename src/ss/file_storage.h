@@ -18,6 +18,17 @@
 //         ├── file1.txt.meta
 //         └── file2.txt.meta
 
+#define MAX_SENTENCE_METADATA 1024
+
+typedef struct {
+    int sentence_id;
+    int version;
+    size_t offset;      // byte offset within file (best effort)
+    size_t length;      // byte length (best effort)
+    int word_count;
+    int char_count;
+} SentenceMeta;
+
 // File metadata structure - stores all information about a file
 typedef struct {
     char owner[64];           // Username of file owner
@@ -28,6 +39,11 @@ typedef struct {
     int word_count;           // Total word count (for INFO command)
     int char_count;           // Total character count (for INFO command)
     ACL acl;                  // Access Control List (Step 4)
+
+    // Sentence metadata (Phase 4)
+    int sentence_count;
+    int next_sentence_id;
+    SentenceMeta sentences[MAX_SENTENCE_METADATA];
 } FileMetadata;
 
 // Create an empty file in the storage directory
@@ -67,6 +83,11 @@ int file_create(const char *storage_dir, const char *filename, const char *owner
 //   }
 int file_read(const char *storage_dir, const char *filename, 
               char *content_buf, size_t buf_size, size_t *actual_size);
+
+// Read entire file content into an allocated buffer.
+// Caller must free(*out_buf).
+int file_read_all(const char *storage_dir, const char *filename,
+                  char **out_buf, size_t *out_len);
 
 // Delete a file and its metadata
 // storage_dir: Base storage directory
@@ -151,6 +172,9 @@ int metadata_update_last_accessed(const char *storage_dir, const char *filename)
 //   metadata_update_last_modified("./storage_ss1", "test.txt");
 int metadata_update_last_modified(const char *storage_dir, const char *filename);
 
+// Ensure sentence metadata exists (builds default sentences if missing).
+int metadata_ensure_sentences(const char *storage_dir, const char *filename, FileMetadata *metadata);
+
 // Count words and characters in file content
 // This is used for INFO command to display statistics
 // content: File content (null-terminated string)
@@ -165,6 +189,9 @@ int metadata_update_last_modified(const char *storage_dir, const char *filename)
 //   count_file_stats("Hello world!", &words, &chars);
 //   // words = 2, chars = 12
 void count_file_stats(const char *content, int *word_count, int *char_count);
+
+// Ensure sentence metadata exists (build default single sentence if needed)
+int metadata_ensure_sentences(const char *storage_dir, const char *filename, FileMetadata *metadata);
 
 #endif
 

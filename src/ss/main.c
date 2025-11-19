@@ -15,6 +15,21 @@
 #include "../common/protocol.h"
 #include "file_scan.h"
 #include "file_storage.h"
+#include "write_session.h"
+#include "runtime_state.h"
+
+#define DEFAULT_WORKERS 8
+#define WORK_QUEUE_CAP 64
+
+typedef struct {
+    int fds[WORK_QUEUE_CAP];
+    int head;
+    int tail;
+    int count;
+    pthread_mutex_t mu;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
+} WorkQueue;
 
 typedef struct {
     const char *nm_host;
@@ -26,6 +41,9 @@ typedef struct {
     int nm_fd;           // Connection TO NM (for registration/heartbeat)
     int server_fd;      // Server socket listening on client_port (for commands from NM)
     int running;
+    int worker_count;
+    pthread_t workers[DEFAULT_WORKERS];
+    WorkQueue queue;
 } Ctx;
 
 // Ensure storage directory exists and has proper structure
@@ -40,6 +58,148 @@ static void ensure_storage_dir(const char *path) {
         log_error("ss_storage_dir", "failed to create dir: %s", path);
     }
     // Subdirectories (files/, metadata/) will be created by file_storage functions when needed
+}
+
+static void encode_newlines(const char *src, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return;
+    size_t pos = 0;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    while (*src && pos < dst_len - 1) {
+        if (*src == '\n') {
+            dst[pos++] = '\x01';
+        } else {
+            dst[pos++] = *src;
+        }
+        src++;
+    }
+    dst[pos] = '\0';
+}
+
+static void work_queue_init(WorkQueue *q) {
+    memset(q, 0, sizeof(*q));
+    pthread_mutex_init(&q->mu, NULL);
+    pthread_cond_init(&q->not_empty, NULL);
+    pthread_cond_init(&q->not_full, NULL);
+}
+
+static void work_queue_destroy(WorkQueue *q) {
+    pthread_mutex_destroy(&q->mu);
+    pthread_cond_destroy(&q->not_empty);
+    pthread_cond_destroy(&q->not_full);
+}
+
+static int work_queue_push(Ctx *ctx, int fd) {
+    WorkQueue *q = &ctx->queue;
+    pthread_mutex_lock(&q->mu);
+    while (q->count >= WORK_QUEUE_CAP && ctx->running) {
+        pthread_cond_wait(&q->not_full, &q->mu);
+    }
+    if (!ctx->running) {
+        pthread_mutex_unlock(&q->mu);
+        return -1;
+    }
+    q->fds[q->tail] = fd;
+    q->tail = (q->tail + 1) % WORK_QUEUE_CAP;
+    q->count++;
+    pthread_cond_signal(&q->not_empty);
+    pthread_mutex_unlock(&q->mu);
+    return 0;
+}
+
+static int work_queue_pop(Ctx *ctx) {
+    WorkQueue *q = &ctx->queue;
+    pthread_mutex_lock(&q->mu);
+    while (q->count == 0) {
+        if (!ctx->running) {
+            pthread_mutex_unlock(&q->mu);
+            return -1;
+        }
+        pthread_cond_wait(&q->not_empty, &q->mu);
+    }
+    int fd = q->fds[q->head];
+    q->head = (q->head + 1) % WORK_QUEUE_CAP;
+    q->count--;
+    pthread_cond_signal(&q->not_full);
+    pthread_mutex_unlock(&q->mu);
+    return fd;
+}
+
+static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg);
+
+static void process_connection(Ctx *ctx, int client_fd) {
+    char cmd_line[MAX_LINE];
+    int n = recv_line(client_fd, cmd_line, sizeof(cmd_line));
+    if (n <= 0) {
+        close(client_fd);
+        return;
+    }
+    Message cmd_msg;
+    if (proto_parse_line(cmd_line, &cmd_msg) != 0) {
+        log_error("ss_parse_error", "failed to parse command");
+        close(client_fd);
+        return;
+    }
+    handle_command(ctx, client_fd, cmd_msg);
+}
+
+static void *worker_thread(void *arg) {
+    Ctx *ctx = (Ctx*)arg;
+    while (ctx->running) {
+        int fd = work_queue_pop(ctx);
+        if (fd < 0) break;
+        process_connection(ctx, fd);
+    }
+    return NULL;
+}
+
+static void *cmd_thread(void *arg) {
+    Ctx *ctx = (Ctx*)arg;
+    work_queue_init(&ctx->queue);
+    ctx->worker_count = DEFAULT_WORKERS;
+    for (int i = 0; i < ctx->worker_count; i++) {
+        pthread_create(&ctx->workers[i], NULL, worker_thread, ctx);
+    }
+
+    int server_fd = create_server_socket(ctx->host, ctx->client_port);
+    if (server_fd < 0) {
+        log_error("ss_server_socket", "failed to create server socket on %s:%d", ctx->host, ctx->client_port);
+        ctx->running = 0;
+        pthread_cond_broadcast(&ctx->queue.not_empty);
+        pthread_cond_broadcast(&ctx->queue.not_full);
+        work_queue_destroy(&ctx->queue);
+        return NULL;
+    }
+    ctx->server_fd = server_fd;
+    log_info("ss_listen", "listening on %s:%d for commands", ctx->host, ctx->client_port);
+
+    while (ctx->running) {
+        struct sockaddr_in addr;
+        socklen_t addr_len = sizeof(addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&addr, &addr_len);
+        if (client_fd < 0) {
+            if (ctx->running) continue;
+            break;
+        }
+        if (work_queue_push(ctx, client_fd) != 0) {
+            close(client_fd);
+            break;
+        }
+    }
+
+    close(server_fd);
+    pthread_mutex_lock(&ctx->queue.mu);
+    ctx->running = 0;
+    pthread_cond_broadcast(&ctx->queue.not_empty);
+    pthread_cond_broadcast(&ctx->queue.not_full);
+    pthread_mutex_unlock(&ctx->queue.mu);
+    for (int i = 0; i < ctx->worker_count; i++) {
+        pthread_join(ctx->workers[i], NULL);
+    }
+    work_queue_destroy(&ctx->queue);
+    return NULL;
 }
 
 // Periodic heartbeat sender to NM.
@@ -63,44 +223,8 @@ static void *hb_thread(void *arg) {
     return NULL;
 }
 
-// Command handler thread - processes commands from NM
-static void *cmd_thread(void *arg) {
-    Ctx *ctx = (Ctx*)arg;
-    
-    // Set up server socket to listen for commands from NM
-    int server_fd = create_server_socket(ctx->host, ctx->client_port);
-    if (server_fd < 0) {
-        log_error("ss_server_socket", "failed to create server socket on %s:%d", ctx->host, ctx->client_port);
-        return NULL;
-    }
-    ctx->server_fd = server_fd;
-    log_info("ss_listen", "listening on %s:%d for commands", ctx->host, ctx->client_port);
-    
-    while (ctx->running) {
-        // Accept connection from NM
-        struct sockaddr_in addr;
-        socklen_t addr_len = sizeof(addr);
-        int client_fd = accept(server_fd, (struct sockaddr*)&addr, &addr_len);
-        if (client_fd < 0) {
-            if (ctx->running) continue;
-            break;
-        }
-        
-        // Handle command on this connection
-        char cmd_line[MAX_LINE];
-        int n = recv_line(client_fd, cmd_line, sizeof(cmd_line));
-        if (n <= 0) {
-            close(client_fd);
-            continue;
-        }
-        
-        // Parse command message
-        Message cmd_msg;
-        if (proto_parse_line(cmd_line, &cmd_msg) != 0) {
-            log_error("ss_parse_error", "failed to parse command");
-            close(client_fd);
-            continue;
-        }
+// Command handler logic for a single connection
+static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
         
         // Handle CREATE command
         if (strcmp(cmd_msg.type, "CREATE") == 0) {
@@ -133,6 +257,8 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 log_error("ss_create_failed", "file=%s", filename);
             }
+            close(client_fd);
+            return;
         }
         // Handle DELETE command
         else if (strcmp(cmd_msg.type, "DELETE") == 0) {
@@ -182,7 +308,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_read_failed", "file=%s reason=not_found", filename);
-                continue;
+                return;
             }
             
             // Load metadata to check read access
@@ -195,7 +321,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_read_failed", "file=%s reason=metadata_load_failed", filename);
-                continue;
+                return;
             }
             
             // Check read access using ACL
@@ -207,7 +333,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_read_failed", "file=%s user=%s reason=unauthorized", filename, username);
-                continue;
+                return;
             }
             
             // Read file content
@@ -221,7 +347,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_read_failed", "file=%s reason=read_failed", filename);
-                continue;
+                return;
             }
             
             // Send file content
@@ -276,6 +402,7 @@ static void *cmd_thread(void *arg) {
             
             log_info("ss_file_read", "file=%s user=%s size=%zu", filename, username, actual_size);
             close(client_fd);
+            return;
         }
         // Handle STREAM command (from client)
         else if (strcmp(cmd_msg.type, "STREAM") == 0) {
@@ -293,7 +420,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_stream_failed", "file=%s reason=not_found", filename);
-                continue;
+                return;
             }
             
             // Load metadata to check read access
@@ -306,7 +433,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_stream_failed", "file=%s reason=metadata_load_failed", filename);
-                continue;
+                return;
             }
             
             // Check read access using ACL
@@ -318,7 +445,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_stream_failed", "file=%s user=%s reason=unauthorized", filename, username);
-                continue;
+                return;
             }
             
             // Read file content
@@ -332,7 +459,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_stream_failed", "file=%s reason=read_failed", filename);
-                continue;
+                return;
             }
             
             // Parse content into words (split by spaces)
@@ -407,6 +534,174 @@ static void *cmd_thread(void *arg) {
             
             log_info("ss_file_streamed", "file=%s user=%s words=%d", filename, username, word_count);
             close(client_fd);
+            return;
+        }
+        // Handle WRITE command
+        else if (strcmp(cmd_msg.type, "WRITE") == 0) {
+            char filename[256] = {0};
+            int sentence_index = 0;
+            if (strlen(cmd_msg.payload) > 0) {
+                char payload_copy[512];
+                size_t payload_len = strlen(cmd_msg.payload);
+                size_t copy_len = (payload_len < sizeof(payload_copy) - 1) ? payload_len : sizeof(payload_copy) - 1;
+                memcpy(payload_copy, cmd_msg.payload, copy_len);
+                payload_copy[copy_len] = '\0';
+                char *sep = strchr(payload_copy, '|');
+                if (sep) {
+                    *sep = '\0';
+                    sentence_index = atoi(sep + 1);
+                }
+                size_t fn_len = strlen(payload_copy);
+                size_t fn_copy = (fn_len < sizeof(filename) - 1) ? fn_len : sizeof(filename) - 1;
+                memcpy(filename, payload_copy, fn_copy);
+                filename[fn_copy] = '\0';
+            } else {
+                size_t fn_len = strlen(cmd_msg.payload);
+                size_t fn_copy = (fn_len < sizeof(filename) - 1) ? fn_len : sizeof(filename) - 1;
+                memcpy(filename, cmd_msg.payload, fn_copy);
+                filename[fn_copy] = '\0';
+            }
+
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "NOT_FOUND", "File not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            if (!acl_check_write(&meta.acl, cmd_msg.username)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "UNAUTHORIZED", "User does not have write access",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+
+            WriteSession session;
+            char err_buf[256];
+            char *current_sentence = NULL;
+            if (write_session_begin(&session, ctx->storage_dir, filename,
+                                    sentence_index, cmd_msg.username,
+                                    &current_sentence, err_buf, sizeof(err_buf)) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "INVALID", err_buf,
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+
+            Message ready = {0};
+            (void)snprintf(ready.type, sizeof(ready.type), "%s", "WRITE_READY");
+            (void)snprintf(ready.id, sizeof(ready.id), "%s", cmd_msg.id);
+            (void)snprintf(ready.username, sizeof(ready.username), "%s", cmd_msg.username);
+            (void)snprintf(ready.role, sizeof(ready.role), "%s", "SS");
+            if (current_sentence && strlen(current_sentence) > 0) {
+                encode_newlines(current_sentence, ready.payload, sizeof(ready.payload));
+            } else {
+                ready.payload[0] = '\0';
+            }
+            char ready_buf[MAX_LINE];
+            proto_format_line(&ready, ready_buf, sizeof(ready_buf));
+            send_all(client_fd, ready_buf, strlen(ready_buf));
+            free(current_sentence);
+
+            int write_active = 1;
+            while (write_active && ctx->running) {
+                char write_line[MAX_LINE];
+                int rn = recv_line(client_fd, write_line, sizeof(write_line));
+                if (rn <= 0) {
+                    log_error("ss_write_disconnect", "user=%s file=%s", cmd_msg.username, filename);
+                    write_session_abort(&session);
+                    break;
+                }
+                Message write_cmd;
+                if (proto_parse_line(write_line, &write_cmd) != 0) {
+                    log_error("ss_write_parse", "invalid write message");
+                    continue;
+                }
+                if (strcmp(write_cmd.type, "WRITE_EDIT") == 0) {
+                    char payload_copy[512];
+                    strncpy(payload_copy, write_cmd.payload, sizeof(payload_copy) - 1);
+                    payload_copy[sizeof(payload_copy) - 1] = '\0';
+                    char *sep = strchr(payload_copy, '|');
+                    if (!sep) {
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                       "INVALID", "Invalid write payload",
+                                       error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                    continue;
+                    }
+                    *sep = '\0';
+                    int word_index = atoi(payload_copy);
+                    const char *content = sep + 1;
+                    if (write_session_apply_edit(&session, word_index, content,
+                                                 err_buf, sizeof(err_buf)) != 0) {
+                        char error_buf[MAX_LINE];
+                        proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                           "INVALID", err_buf,
+                                           error_buf, sizeof(error_buf));
+                        send_all(client_fd, error_buf, strlen(error_buf));
+                        continue;
+                    }
+                    Message ack = {0};
+                    (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                    (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                    (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                    (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                    (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "edit applied");
+                    char ack_buf[MAX_LINE];
+                    proto_format_line(&ack, ack_buf, sizeof(ack_buf));
+                    send_all(client_fd, ack_buf, strlen(ack_buf));
+                } else if (strcmp(write_cmd.type, "WRITE_DONE") == 0) {
+                    if (write_session_commit(&session, err_buf, sizeof(err_buf)) != 0) {
+                        char error_buf[MAX_LINE];
+                        proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                           "INVALID", err_buf,
+                                           error_buf, sizeof(error_buf));
+                        send_all(client_fd, error_buf, strlen(error_buf));
+                        write_session_abort(&session);
+                    } else {
+                        Message ack = {0};
+                        (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                        (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                        (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                        (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                        (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "Write Successful!");
+                        char ack_buf[MAX_LINE];
+                        proto_format_line(&ack, ack_buf, sizeof(ack_buf));
+                        send_all(client_fd, ack_buf, strlen(ack_buf));
+                    }
+                    write_active = 0;
+                } else if (strcmp(write_cmd.type, "WRITE_ABORT") == 0) {
+                    write_session_abort(&session);
+                    Message ack = {0};
+                    (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                    (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                    (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                    (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                    (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "Write aborted");
+                    char ack_buf[MAX_LINE];
+                    proto_format_line(&ack, ack_buf, sizeof(ack_buf));
+                    send_all(client_fd, ack_buf, strlen(ack_buf));
+                    write_active = 0;
+                } else {
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                       "INVALID", "Unknown write command",
+                                       error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                }
+            }
+            close(client_fd);
+            return;
         }
         // Handle UPDATE_ACL command (from NM)
         else if (strcmp(cmd_msg.type, "UPDATE_ACL") == 0) {
@@ -497,7 +792,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_update_acl_failed", "file=%s reason=not_found", filename);
-                continue;
+                return;
             }
             
             // Update ACL based on action
@@ -520,7 +815,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_update_acl_failed", "file=%s reason=save_failed", filename);
-                continue;
+                return;
             }
             
             // Send ACK
@@ -537,6 +832,7 @@ static void *cmd_thread(void *arg) {
             
             log_info("ss_acl_updated", "file=%s action=%s target=%s", filename, action, target_user);
             close(client_fd);
+            return;
         }
         // Handle GET_ACL command (from NM)
         else if (strcmp(cmd_msg.type, "GET_ACL") == 0) {
@@ -553,7 +849,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_get_acl_failed", "file=%s reason=not_found", filename);
-                continue;
+                return;
             }
 
             char acl_buf[4096];
@@ -565,7 +861,7 @@ static void *cmd_thread(void *arg) {
                 send_all(client_fd, error_buf, strlen(error_buf));
                 close(client_fd);
                 log_error("ss_get_acl_failed", "file=%s reason=serialize_failed", filename);
-                continue;
+                return;
             }
 
             // Replace newlines with \x01
@@ -593,6 +889,7 @@ static void *cmd_thread(void *arg) {
 
             log_info("ss_acl_sent", "file=%s requester=%s", filename, cmd_msg.username);
             close(client_fd);
+            return;
         }
         // Unknown command
         else {
@@ -603,11 +900,8 @@ static void *cmd_thread(void *arg) {
                               error_buf, sizeof(error_buf));
             send_all(client_fd, error_buf, strlen(error_buf));
             close(client_fd);
+            return;
         }
-    }
-    
-    close(server_fd);
-    return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -631,6 +925,8 @@ int main(int argc, char **argv) {
     log_info("ss_scan_start", "scanning storage directory: %s", ctx.storage_dir);
     ScanResult scan_result = scan_directory(ctx.storage_dir, "files");
     log_info("ss_scan_complete", "found %d files", scan_result.count);
+
+    runtime_state_init();
     
     // Build file list string for registration payload
     // Format: "host=IP,client_port=PORT,storage=DIR,files=file1.txt,file2.txt,..."
@@ -698,6 +994,7 @@ int main(int argc, char **argv) {
     if (ctx.server_fd >= 0) {
         close(ctx.server_fd);
     }
+    runtime_state_shutdown();
     return 0;
 }
 

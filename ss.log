@@ -1,5 +1,61 @@
-{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_scan_start","msg":"scanning storage directory: ./storage_ss1"}
-{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_scan_complete","msg":"found 1 files"}
-{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_registered","msg":"payload=host=127.0.0.1,client_port=6001,storage=./storage_ss1,files=hello.txt"}
-{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_ready","msg":"SS running - heartbeat and command handler active"}
-{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_listen","msg":"listening on 127.0.0.1:6001 for commands"}
+{"ts":"2025-11-19T14:53:09","level":"INFO","event":"ss_scan_start","msg":"scanning storage directory: ./storage_ss1"}
+{"ts":"2025-11-19T14:53:09","level":"INFO","event":"ss_scan_complete","msg":"found 2 files"}
+{"ts":"2025-11-19T14:53:09","level":"INFO","event":"ss_registered","msg":"payload=host=127.0.0.1,client_port=6001,storage=./storage_ss1,files=test.txt,new.txt"}
+{"ts":"2025-11-19T14:53:09","level":"INFO","event":"ss_ready","msg":"SS running - heartbeat and command handler active"}
+{"ts":"2025-11-19T14:53:09","level":"INFO","event":"ss_listen","msg":"listening on 127.0.0.1:6001 for commands"}
+{"ts":"2025-11-19T14:53:44","level":"INFO","event":"ss_cmd_create","msg":"file=test2.txt owner=alice"}
+{"ts":"2025-11-19T14:53:44","level":"INFO","event":"ss_file_created","msg":"file=test2.txt"}
+{"ts":"2025-11-19T14:54:04","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:04","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:04","level":"INFO","event":"ss_cmd_update_acl","msg":"file=test2.txt action=ADD flag=W target=inesh"}
+{"ts":"2025-11-19T14:54:04","level":"INFO","event":"ss_acl_updated","msg":"file=test2.txt action=ADD target=inesh"}
+{"ts":"2025-11-19T14:54:14","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:14","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:44","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:44","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:44","level":"INFO","event":"ss_cmd_read","msg":"file=test2.txt user=inesh"}
+{"ts":"2025-11-19T14:54:44","level":"INFO","event":"ss_file_read","msg":"file=test2.txt user=inesh size=48"}
+{"ts":"2025-11-19T14:54:57","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:54:57","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:55:32","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:55:32","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:02","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:02","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:02","level":"INFO","event":"ss_cmd_read","msg":"file=test2.txt user=alice"}
+{"ts":"2025-11-19T14:56:02","level":"INFO","event":"ss_file_read","msg":"file=test2.txt user=alice size=81"}
+{"ts":"2025-11-19T14:56:19","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:19","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:40","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:40","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:56:40","level":"INFO","event":"ss_cmd_read","msg":"file=test2.txt user=alice"}
+{"ts":"2025-11-19T14:56:40","level":"INFO","event":"ss_file_read","msg":"file=test2.txt user=alice size=86"}
+{"ts":"2025-11-19T14:57:00","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:57:00","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:57:23","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:57:23","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:57:23","level":"INFO","event":"ss_cmd_read","msg":"file=test2.txt user=alice"}
+{"ts":"2025-11-19T14:57:23","level":"INFO","event":"ss_file_read","msg":"file=test2.txt user=alice size=97"}
+{"ts":"2025-11-19T14:58:02","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:58:02","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:58:02","level":"INFO","event":"ss_cmd_update_acl","msg":"file=test2.txt action=REMOVE flag= target=inesh"}
+{"ts":"2025-11-19T14:58:02","level":"INFO","event":"ss_acl_updated","msg":"file=test2.txt action=REMOVE target=inesh"}
+{"ts":"2025-11-19T14:58:07","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:58:07","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:59:13","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:59:13","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T14:59:13","level":"INFO","event":"ss_cmd_update_acl","msg":"file=test2.txt action=ADD flag=W target=inesh"}
+{"ts":"2025-11-19T14:59:13","level":"INFO","event":"ss_acl_updated","msg":"file=test2.txt action=ADD target=inesh"}
+{"ts":"2025-11-19T15:00:19","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:00:19","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:00:19","level":"INFO","event":"ss_cmd_read","msg":"file=test2.txt user=alice"}
+{"ts":"2025-11-19T15:00:19","level":"INFO","event":"ss_file_read","msg":"file=test2.txt user=alice size=97"}
+{"ts":"2025-11-19T15:01:00","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:01:00","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:01:50","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:01:50","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:01:50","level":"INFO","event":"ss_cmd_stream","msg":"file=test2.txt user=inesh"}
+{"ts":"2025-11-19T15:01:52","level":"INFO","event":"ss_file_streamed","msg":"file=test2.txt user=inesh words=15"}
+{"ts":"2025-11-19T15:02:03","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:02:03","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T15:02:03","level":"INFO","event":"ss_cmd_stream","msg":"file=test2.txt user=inesh"}
+{"ts":"2025-11-19T15:02:05","level":"INFO","event":"ss_file_streamed","msg":"file=test2.txt user=inesh words=16"}

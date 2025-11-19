@@ -645,6 +645,48 @@ int handle_stream(int client_fd, const char *username, const char *filename) {
     return send_all(client_fd, resp_buf, strlen(resp_buf));
 }
 
+int handle_write(int client_fd, const char *username, const char *filename, int sentence_index) {
+    (void)sentence_index;
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 1, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    char ss_info[256];
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "SS_INFO");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", ss_info);
+
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to format response");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    log_info("nm_cmd_write", "file=%s user=%s", filename, username);
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
 // Handle ADDACCESS command
 int handle_addaccess(int client_fd, const char *username, const char *flag,
                      const char *filename, const char *target_username) {
