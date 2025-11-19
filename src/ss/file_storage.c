@@ -1,4 +1,5 @@
 #include "file_storage.h"
+#include "sentence_parser.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -57,6 +58,8 @@ int file_create(const char *storage_dir, const char *filename, const char *owner
     meta.size_bytes = 0;
     meta.word_count = 0;
     meta.char_count = 0;
+    meta.sentence_count = 0;
+    meta.next_sentence_id = 1;
     
     // Initialize ACL with owner (Step 4)
     meta.acl = acl_init(owner);
@@ -99,6 +102,46 @@ int file_read(const char *storage_dir, const char *filename,
     }
     
     return 0;  // Success
+}
+
+int file_read_all(const char *storage_dir, const char *filename,
+                  char **out_buf, size_t *out_len) {
+    if (!storage_dir || !filename || !out_buf) return -1;
+
+    char file_path[512];
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
+
+    FILE *fp = fopen(file_path, "r");
+    if (!fp) {
+        return -1;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    long size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    char *buffer = (char *)malloc((size_t)size + 1);
+    if (!buffer) {
+        fclose(fp);
+        return -1;
+    }
+    size_t read_bytes = fread(buffer, 1, (size_t)size, fp);
+    fclose(fp);
+    buffer[read_bytes] = '\0';
+    *out_buf = buffer;
+    if (out_len) {
+        *out_len = read_bytes;
+    }
+    return 0;
 }
 
 // Delete file and metadata
@@ -155,6 +198,7 @@ int metadata_load(const char *storage_dir, const char *filename, FileMetadata *m
     
     // Initialize metadata structure
     memset(metadata, 0, sizeof(FileMetadata));
+    metadata->next_sentence_id = 1;
     
     // Read entire file into buffer for ACL parsing
     fseek(fp, 0, SEEK_END);
@@ -201,6 +245,45 @@ int metadata_load(const char *storage_dir, const char *filename, FileMetadata *m
             metadata->word_count = atoi(line + 11);
         } else if (strncmp(line, "char_count=", 11) == 0) {
             metadata->char_count = atoi(line + 11);
+        } else if (strncmp(line, "sentence_count=", 15) == 0) {
+            int count = atoi(line + 15);
+            if (count < 0) count = 0;
+            if (count > MAX_SENTENCE_METADATA) count = MAX_SENTENCE_METADATA;
+            metadata->sentence_count = count;
+        } else if (strncmp(line, "next_sentence_id=", 17) == 0) {
+            int next_id = atoi(line + 17);
+            if (next_id <= 0) next_id = 1;
+            metadata->next_sentence_id = next_id;
+        } else if (strncmp(line, "sentence_", 9) == 0) {
+            char *eq = strchr(line, '=');
+            if (!eq) {
+                line = strtok_r(NULL, "\n", &saveptr);
+                continue;
+            }
+            int idx = atoi(line + 9);
+            if (idx < 0 || idx >= MAX_SENTENCE_METADATA) {
+                line = strtok_r(NULL, "\n", &saveptr);
+                continue;
+            }
+            SentenceMeta *sm = &metadata->sentences[idx];
+            int id = 0, version = 0, wcount = 0, ccount = 0;
+            size_t offset = 0, length = 0;
+            int parsed = sscanf(eq + 1, "%d,%d,%zu,%zu,%d,%d",
+                                &id, &version, &offset, &length, &wcount, &ccount);
+            if (parsed == 6) {
+                sm->sentence_id = id;
+                sm->version = version;
+                sm->offset = offset;
+                sm->length = length;
+                sm->word_count = wcount;
+                sm->char_count = ccount;
+                if (idx + 1 > metadata->sentence_count) {
+                    metadata->sentence_count = idx + 1;
+                }
+                if (metadata->next_sentence_id <= sm->sentence_id) {
+                    metadata->next_sentence_id = sm->sentence_id + 1;
+                }
+            }
         } else if (strncmp(line, "ACL_START", 9) == 0) {
             // ACL section starts - collect all ACL lines
             char acl_buf[4096] = {0};
@@ -274,6 +357,19 @@ int metadata_save(const char *storage_dir, const char *filename, const FileMetad
     fprintf(fp, "size_bytes=%zu\n", metadata->size_bytes);
     fprintf(fp, "word_count=%d\n", metadata->word_count);
     fprintf(fp, "char_count=%d\n", metadata->char_count);
+    fprintf(fp, "sentence_count=%d\n", metadata->sentence_count);
+    fprintf(fp, "next_sentence_id=%d\n", metadata->next_sentence_id);
+    for (int i = 0; i < metadata->sentence_count && i < MAX_SENTENCE_METADATA; i++) {
+        const SentenceMeta *sm = &metadata->sentences[i];
+        fprintf(fp, "sentence_%d=%d,%d,%zu,%zu,%d,%d\n",
+                i,
+                sm->sentence_id,
+                sm->version,
+                sm->offset,
+                sm->length,
+                sm->word_count,
+                sm->char_count);
+    }
     
     // Write ACL (Step 4)
     fprintf(fp, "ACL_START\n");
@@ -360,5 +456,23 @@ void count_file_stats(const char *content, int *word_count, int *char_count) {
     // Set results
     if (word_count) *word_count = words;
     if (char_count) *char_count = chars;
+}
+
+int metadata_ensure_sentences(const char *storage_dir, const char *filename, FileMetadata *metadata) {
+    if (!storage_dir || !filename || !metadata) return -1;
+    if (metadata->sentence_count > 0) {
+        return 0;
+    }
+    if (metadata->next_sentence_id <= 0) {
+        metadata->next_sentence_id = 1;
+    }
+    metadata->sentence_count = 1;
+    metadata->sentences[0].sentence_id = metadata->next_sentence_id++;
+    metadata->sentences[0].version = 1;
+    metadata->sentences[0].offset = 0;
+    metadata->sentences[0].length = metadata->char_count;
+    metadata->sentences[0].word_count = metadata->word_count;
+    metadata->sentences[0].char_count = metadata->char_count;
+    return metadata_save(storage_dir, filename, metadata);
 }
 

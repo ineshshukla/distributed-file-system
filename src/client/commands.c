@@ -89,7 +89,34 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
             payload[0] = '\0';  // No flags
         }
     }
-    // For commands with arguments (CREATE, DELETE, INFO, etc.): just the argument
+    // For ADDACCESS: flag|filename|username
+    else if (strcmp(cmd->cmd, "ADDACCESS") == 0) {
+        if (cmd->argc >= 2) {
+            // Get flag from flags string (should be "R" or "W")
+            const char *flag = (cmd->has_flags && strlen(cmd->flags) > 0) ? cmd->flags : "R";
+            (void)snprintf(payload, sizeof(payload), "%s|%s|%s", flag, cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For REMACCESS: filename|username
+    else if (strcmp(cmd->cmd, "REMACCESS") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    else if (strcmp(cmd->cmd, "WRITE") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For commands with arguments (CREATE, DELETE, INFO, READ, STREAM, etc.): just the argument
     else if (cmd->argc > 0) {
         // First argument is the filename (or whatever the command needs)
         strncpy(payload, cmd->args[0], sizeof(payload) - 1);

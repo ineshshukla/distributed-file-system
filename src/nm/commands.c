@@ -11,6 +11,74 @@
 #include "../common/log.h"
 #include "registry.h"
 
+static int get_ss_connection_for_file(const FileEntry *entry);
+
+// Helper: Fetch ACL from storage server
+static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
+    if (!entry || !acl_out) return -1;
+
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        return -1;
+    }
+
+    // Send GET_ACL command
+    Message req = {0};
+    (void)snprintf(req.type, sizeof(req.type), "%s", "GET_ACL");
+    (void)snprintf(req.id, sizeof(req.id), "%s", "1");
+    (void)snprintf(req.username, sizeof(req.username), "%s", "NM");
+    (void)snprintf(req.role, sizeof(req.role), "%s", "NM");
+    (void)snprintf(req.payload, sizeof(req.payload), "%s", entry->filename);
+
+    char req_buf[MAX_LINE];
+    if (proto_format_line(&req, req_buf, sizeof(req_buf)) != 0) {
+        close(ss_fd);
+        return -1;
+    }
+    if (send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        return -1;
+    }
+
+    // Receive response
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    if (n <= 0) {
+        return -1;
+    }
+
+    Message resp;
+    if (proto_parse_line(resp_buf, &resp) != 0) {
+        return -1;
+    }
+
+    if (strcmp(resp.type, "ERROR") == 0) {
+        return -1;
+    }
+
+    if (strcmp(resp.type, "ACL") != 0) {
+        return -1;
+    }
+
+    // Convert \x01 back to \n
+    char acl_serialized[4096];
+    size_t pos = 0;
+    for (size_t i = 0; i < strlen(resp.payload) && pos < sizeof(acl_serialized) - 1; i++) {
+        if (resp.payload[i] == '\x01') {
+            acl_serialized[pos++] = '\n';
+        } else {
+            acl_serialized[pos++] = resp.payload[i];
+        }
+    }
+    acl_serialized[pos] = '\0';
+
+    if (acl_deserialize(acl_out, acl_serialized) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
 // Helper: Send error response
 int send_error_response(int client_fd, const char *id, const char *username,
                        const Error *error) {
@@ -577,5 +645,311 @@ int handle_list(int client_fd, const char *username) {
     }
     
     return send_data_response(client_fd, "", username, output);
+}
+
+// Handle READ command - Returns SS connection info for direct client connection
+int handle_read(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file in index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Load ACL from SS and check read access
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 0, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+    
+    // Format SS connection info: host=IP,port=PORT
+    char ss_info[256];
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+    
+    // Send SS_INFO message to client
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "SS_INFO");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", ss_info);
+    
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        log_error("nm_read_fmt", "failed to format SS_INFO response");
+        Error err = error_simple(ERR_INTERNAL, "Failed to format response");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_read_ss_info", "file=%s user=%s ss=%s:%d", filename, username, entry->ss_host, entry->ss_client_port);
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+// Handle STREAM command - Returns SS connection info for direct client connection
+int handle_stream(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file in index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Load ACL and check read access
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 0, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+    
+    // Format SS connection info: host=IP,port=PORT
+    char ss_info[256];
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+    
+    // Send SS_INFO message to client
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "SS_INFO");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", ss_info);
+    
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        log_error("nm_stream_fmt", "failed to format SS_INFO response");
+        Error err = error_simple(ERR_INTERNAL, "Failed to format response");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_stream_ss_info", "file=%s user=%s ss=%s:%d", filename, username, entry->ss_host, entry->ss_client_port);
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+int handle_write(int client_fd, const char *username, const char *filename, int sentence_index) {
+    (void)sentence_index;
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 1, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    char ss_info[256];
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+
+    Message resp = {0};
+    (void)snprintf(resp.type, sizeof(resp.type), "%s", "SS_INFO");
+    (void)snprintf(resp.id, sizeof(resp.id), "%s", "");
+    (void)snprintf(resp.username, sizeof(resp.username), "%s", username ? username : "");
+    (void)snprintf(resp.role, sizeof(resp.role), "%s", "NM");
+    (void)snprintf(resp.payload, sizeof(resp.payload), "%s", ss_info);
+
+    char resp_buf[MAX_LINE];
+    if (proto_format_line(&resp, resp_buf, sizeof(resp_buf)) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to format response");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    log_info("nm_cmd_write", "file=%s user=%s", filename, username);
+    return send_all(client_fd, resp_buf, strlen(resp_buf));
+}
+
+// Handle ADDACCESS command
+int handle_addaccess(int client_fd, const char *username, const char *flag,
+                     const char *filename, const char *target_username) {
+    if (!username || !flag || !filename || !target_username || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file in index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Load ACL and verify requester is owner
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error owner_err = check_file_owner(filename, username, &acl);
+    if (!error_is_ok(&owner_err)) {
+        return send_error_response(client_fd, "", username, &owner_err);
+    }
+    
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Send UPDATE_ACL command to SS
+    Message update_cmd = {0};
+    (void)snprintf(update_cmd.type, sizeof(update_cmd.type), "%s", "UPDATE_ACL");
+    (void)snprintf(update_cmd.id, sizeof(update_cmd.id), "%s", "1");
+    (void)snprintf(update_cmd.username, sizeof(update_cmd.username), "%s", username);
+    (void)snprintf(update_cmd.role, sizeof(update_cmd.role), "%s", "NM");
+    
+    // Payload: action=ADD,flag=R|W,filename=FILE,target_user=USER
+    (void)snprintf(update_cmd.payload, sizeof(update_cmd.payload),
+                   "action=ADD,flag=%s,filename=%s,target_user=%s", flag, filename, target_username);
+    
+    char cmd_line[MAX_LINE];
+    proto_format_line(&update_cmd, cmd_line, sizeof(cmd_line));
+    if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send command to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Wait for ACK from SS
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    
+    if (n <= 0) {
+        Error err = error_simple(ERR_INTERNAL, "No response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    Message ss_resp;
+    if (proto_parse_line(resp_buf, &ss_resp) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Invalid response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if SS returned error
+    if (strcmp(ss_resp.type, "ERROR") == 0) {
+        char error_code[64];
+        char error_msg[256];
+        proto_parse_error(&ss_resp, error_code, sizeof(error_code),
+                         error_msg, sizeof(error_msg));
+        Error err = error_simple(ERR_INTERNAL, error_msg);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Success
+    log_info("nm_access_granted", "file=%s owner=%s target=%s flag=%s", 
+             filename, username, target_username, flag);
+    return send_success_response(client_fd, "", username, "Access granted successfully!");
+}
+
+// Handle REMACCESS command
+int handle_remaccess(int client_fd, const char *username,
+                     const char *filename, const char *target_username) {
+    if (!username || !filename || !target_username || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file in index
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Load ACL and verify requester is owner
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error owner_err = check_file_owner(filename, username, &acl);
+    if (!error_is_ok(&owner_err)) {
+        return send_error_response(client_fd, "", username, &owner_err);
+    }
+    
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Send UPDATE_ACL command to SS
+    Message update_cmd = {0};
+    (void)snprintf(update_cmd.type, sizeof(update_cmd.type), "%s", "UPDATE_ACL");
+    (void)snprintf(update_cmd.id, sizeof(update_cmd.id), "%s", "1");
+    (void)snprintf(update_cmd.username, sizeof(update_cmd.username), "%s", username);
+    (void)snprintf(update_cmd.role, sizeof(update_cmd.role), "%s", "NM");
+    
+    // Payload: action=REMOVE,flag=,filename=FILE,target_user=USER
+    (void)snprintf(update_cmd.payload, sizeof(update_cmd.payload),
+                   "action=REMOVE,flag=,filename=%s,target_user=%s", filename, target_username);
+    
+    char cmd_line[MAX_LINE];
+    proto_format_line(&update_cmd, cmd_line, sizeof(cmd_line));
+    if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send command to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Wait for ACK from SS
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    
+    if (n <= 0) {
+        Error err = error_simple(ERR_INTERNAL, "No response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    Message ss_resp;
+    if (proto_parse_line(resp_buf, &ss_resp) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Invalid response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if SS returned error
+    if (strcmp(ss_resp.type, "ERROR") == 0) {
+        char error_code[64];
+        char error_msg[256];
+        proto_parse_error(&ss_resp, error_code, sizeof(error_code),
+                         error_msg, sizeof(error_msg));
+        Error err = error_simple(ERR_INTERNAL, error_msg);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Success
+    log_info("nm_access_removed", "file=%s owner=%s target=%s", 
+             filename, username, target_username);
+    return send_success_response(client_fd, "", username, "Access removed successfully!");
 }
 

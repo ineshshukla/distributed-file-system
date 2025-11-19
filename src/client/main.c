@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../common/net.h"
@@ -14,6 +16,10 @@
 // Global: connection to NM (kept open for entire session)
 static int g_nm_fd = -1;
 static char g_username[64] = {0};
+
+// Forward declaration
+static int handle_ss_command(const ParsedCommand *cmd, const char *ss_host, int ss_port);
+static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 
 // Send command to NM and receive response
 // Returns: 0 on success, -1 on error
@@ -95,12 +101,472 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
             printf("(No data)\n");
         }
         fflush(stdout);
+    } else if (strcmp(resp.type, "SS_INFO") == 0) {
+        // SS_INFO response - contains SS connection info for direct connection
+        // Payload format: "host=IP,port=PORT"
+        // Parse and connect to SS
+        char ss_host[64] = {0};
+        int ss_port = 0;
+        
+        // Parse payload: "host=IP,port=PORT"
+        char *host_start = strstr(resp.payload, "host=");
+        char *port_start = strstr(resp.payload, "port=");
+        
+        if (host_start) {
+            char *host_end = strchr(host_start + 5, ',');
+            if (host_end) {
+                size_t host_len = host_end - (host_start + 5);
+                if (host_len < sizeof(ss_host)) {
+                    memcpy(ss_host, host_start + 5, host_len);
+                    ss_host[host_len] = '\0';
+                }
+            } else {
+                // No comma, host is at end
+                size_t host_len = strlen(host_start + 5);
+                if (host_len < sizeof(ss_host)) {
+                    memcpy(ss_host, host_start + 5, host_len);
+                    ss_host[host_len] = '\0';
+                }
+            }
+        }
+        
+        if (port_start) {
+            ss_port = atoi(port_start + 5);
+        }
+        
+        if (strlen(ss_host) > 0 && ss_port > 0) {
+            // Connect to SS and handle command
+            return handle_ss_command(cmd, ss_host, ss_port);
+        } else {
+            printf("Error: Invalid SS connection info\n");
+            fflush(stdout);
+            return -1;
+        }
     } else {
         // Unknown response type
         printf("Response: type=%s payload=%s\n", resp.type, resp.payload);
         fflush(stdout);
     }
     
+    return 0;
+}
+
+// Handle direct SS command (READ, STREAM)
+// Connects to SS, sends command, receives data until STOP
+// Returns: 0 on success, -1 on error
+static int handle_ss_command(const ParsedCommand *cmd, const char *ss_host, int ss_port) {
+    if (!cmd || !ss_host || ss_port <= 0) return -1;
+
+    if (strcmp(cmd->cmd, "WRITE") == 0) {
+        return perform_write_session(cmd, ss_host, ss_port);
+    }
+    
+    // Connect to SS
+    int ss_fd = connect_to_host(ss_host, ss_port);
+    if (ss_fd < 0) {
+        printf("Error: Failed to connect to storage server at %s:%d\n", ss_host, ss_port);
+        fflush(stdout);
+        return -1;
+    }
+    
+    // Format command message for SS
+    Message ss_cmd = {0};
+    size_t cmd_len = strlen(cmd->cmd);
+    size_t copy_len = (cmd_len < sizeof(ss_cmd.type) - 1) ? cmd_len : sizeof(ss_cmd.type) - 1;
+    memcpy(ss_cmd.type, cmd->cmd, copy_len);
+    ss_cmd.type[copy_len] = '\0';
+    
+    (void)snprintf(ss_cmd.id, sizeof(ss_cmd.id), "%ld", (long)time(NULL));
+    
+    size_t username_len = strlen(g_username);
+    copy_len = (username_len < sizeof(ss_cmd.username) - 1) ? username_len : sizeof(ss_cmd.username) - 1;
+    memcpy(ss_cmd.username, g_username, copy_len);
+    ss_cmd.username[copy_len] = '\0';
+    
+    memcpy(ss_cmd.role, "CLIENT", 6);
+    ss_cmd.role[6] = '\0';
+    
+    // Payload is filename (first argument)
+    if (cmd->argc > 0) {
+        size_t arg_len = strlen(cmd->args[0]);
+        copy_len = (arg_len < sizeof(ss_cmd.payload) - 1) ? arg_len : sizeof(ss_cmd.payload) - 1;
+        memcpy(ss_cmd.payload, cmd->args[0], copy_len);
+        ss_cmd.payload[copy_len] = '\0';
+    } else {
+        ss_cmd.payload[0] = '\0';
+    }
+    
+    // Send command to SS
+    char cmd_buf[MAX_LINE];
+    if (proto_format_line(&ss_cmd, cmd_buf, sizeof(cmd_buf)) != 0) {
+        printf("Error: Failed to format command for SS\n");
+        fflush(stdout);
+        close(ss_fd);
+        return -1;
+    }
+    
+    if (send_all(ss_fd, cmd_buf, strlen(cmd_buf)) != 0) {
+        printf("Error: Failed to send command to SS\n");
+        fflush(stdout);
+        close(ss_fd);
+        return -1;
+    }
+    
+    // Handle response based on command type
+    if (strcmp(cmd->cmd, "READ") == 0) {
+        // Receive data until STOP packet
+        while (1) {
+            char resp_buf[MAX_LINE];
+            int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+            if (n <= 0) {
+                printf("Error: Connection closed unexpectedly\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            
+            // Parse response
+            Message resp;
+            if (proto_parse_line(resp_buf, &resp) != 0) {
+                printf("Error: Failed to parse response from SS\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            
+            // Check for STOP packet
+            if (strcmp(resp.type, "STOP") == 0) {
+                // End of data
+                break;
+            }
+            
+            // Check for ERROR
+            if (strcmp(resp.type, "ERROR") == 0) {
+                char error_code[64];
+                char error_msg[256];
+                if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                                      error_msg, sizeof(error_msg)) == 0) {
+                    printf("ERROR [%s]: %s\n", error_code, error_msg);
+                } else {
+                    printf("ERROR: %s\n", resp.payload);
+                }
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            
+            // Handle DATA packet
+            if (strcmp(resp.type, "DATA") == 0) {
+                // Convert \x01 (SOH) back to \n
+                if (strlen(resp.payload) > 0) {
+                    char *p = resp.payload;
+                    while (*p) {
+                        if (*p == '\x01') {
+                            putchar('\n');
+                        } else {
+                            putchar(*p);
+                        }
+                        p++;
+                    }
+                }
+            }
+        }
+        
+        // Add final newline if needed
+        printf("\n");
+        fflush(stdout);
+    } else if (strcmp(cmd->cmd, "STREAM") == 0) {
+        // Receive words until STOP packet
+        int first_word = 1;
+        while (1) {
+            char resp_buf[MAX_LINE];
+            int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+            if (n <= 0) {
+                printf("\nError: Connection closed unexpectedly\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            
+            // Parse response
+            Message resp;
+            if (proto_parse_line(resp_buf, &resp) != 0) {
+                printf("\nError: Failed to parse response from SS\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            
+            // Check for STOP packet
+            if (strcmp(resp.type, "STOP") == 0) {
+                // End of stream
+                printf("\n");
+                fflush(stdout);
+                break;
+            }
+            
+            // Check for ERROR
+            if (strcmp(resp.type, "ERROR") == 0) {
+                char error_code[64];
+                char error_msg[256];
+                if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                                      error_msg, sizeof(error_msg)) == 0) {
+                    printf("\nERROR [%s]: %s\n", error_code, error_msg);
+                } else {
+                    printf("\nERROR: %s\n", resp.payload);
+                }
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            
+            // Handle DATA packet (word)
+            if (strcmp(resp.type, "DATA") == 0) {
+                // Print word with space before it (except first word)
+                if (!first_word) {
+                    putchar(' ');
+                }
+                printf("%s", resp.payload);
+                fflush(stdout);
+                first_word = 0;
+            }
+        }
+    }
+    
+    close(ss_fd);
+    return 0;
+}
+
+static void print_payload_with_newlines(const char *payload) {
+    if (!payload) return;
+    for (const char *p = payload; *p; p++) {
+        if (*p == '\x01') {
+            putchar('\n');
+        } else {
+            putchar(*p);
+        }
+    }
+    if (strlen(payload) > 0) {
+        putchar('\n');
+    }
+}
+
+static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, int ss_port) {
+    if (cmd->argc < 2) {
+        printf("Error: WRITE requires filename and sentence index\n");
+        fflush(stdout);
+        return -1;
+    }
+    const char *filename = cmd->args[0];
+    const char *sentence_arg = cmd->args[1];
+    int ss_fd = connect_to_host(ss_host, ss_port);
+    if (ss_fd < 0) {
+        printf("Error: Failed to connect to storage server at %s:%d\n", ss_host, ss_port);
+        fflush(stdout);
+        return -1;
+    }
+
+    Message write_msg = {0};
+    (void)snprintf(write_msg.type, sizeof(write_msg.type), "%s", "WRITE");
+    (void)snprintf(write_msg.id, sizeof(write_msg.id), "%ld", (long)time(NULL));
+    (void)snprintf(write_msg.username, sizeof(write_msg.username), "%s", g_username);
+    (void)snprintf(write_msg.role, sizeof(write_msg.role), "%s", "CLIENT");
+    (void)snprintf(write_msg.payload, sizeof(write_msg.payload), "%s|%s", filename, sentence_arg);
+    
+    char line_buf[MAX_LINE];
+    if (proto_format_line(&write_msg, line_buf, sizeof(line_buf)) != 0 ||
+        send_all(ss_fd, line_buf, strlen(line_buf)) != 0) {
+        printf("Error: Failed to send WRITE request to SS\n");
+        fflush(stdout);
+        close(ss_fd);
+        return -1;
+    }
+
+    int ready = 0;
+    while (!ready) {
+        int n = recv_line(ss_fd, line_buf, sizeof(line_buf));
+        if (n <= 0) {
+            printf("Error: No response from storage server\n");
+            fflush(stdout);
+            close(ss_fd);
+            return -1;
+        }
+        Message resp;
+        if (proto_parse_line(line_buf, &resp) != 0) {
+            printf("Error: Failed to parse response from SS\n");
+            fflush(stdout);
+            close(ss_fd);
+            return -1;
+        }
+        if (strcmp(resp.type, "ERROR") == 0) {
+            char error_code[64];
+            char error_msg[256];
+            if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                                  error_msg, sizeof(error_msg)) == 0) {
+                printf("ERROR [%s]: %s\n", error_code, error_msg);
+            } else {
+                printf("ERROR: %s\n", resp.payload);
+            }
+            fflush(stdout);
+            close(ss_fd);
+            return -1;
+        }
+        if (strcmp(resp.type, "WRITE_READY") == 0) {
+            printf("WRITE session ready for '%s' (sentence %s)\n", filename, sentence_arg);
+            if (strlen(resp.payload) > 0) {
+                printf("Current sentence:\n");
+                print_payload_with_newlines(resp.payload);
+            }
+            ready = 1;
+            break;
+        }
+        // Unexpected data prior to ready; show payload and continue
+        print_payload_with_newlines(resp.payload);
+    }
+
+    printf("Enter '<word_index> <content>' lines (0-based indices). Type ETIRW to finish.\n");
+    fflush(stdout);
+
+    char input[MAX_CMD_LINE];
+    while (1) {
+        printf("WRITE> ");
+        fflush(stdout);
+        if (!fgets(input, sizeof(input), stdin)) {
+            printf("\nAborting WRITE (no input)\n");
+            fflush(stdout);
+            Message abort_msg = {0};
+            (void)snprintf(abort_msg.type, sizeof(abort_msg.type), "%s", "WRITE_ABORT");
+            (void)snprintf(abort_msg.id, sizeof(abort_msg.id), "%ld", (long)time(NULL));
+            (void)snprintf(abort_msg.username, sizeof(abort_msg.username), "%s", g_username);
+            (void)snprintf(abort_msg.role, sizeof(abort_msg.role), "%s", "CLIENT");
+            abort_msg.payload[0] = '\0';
+            if (proto_format_line(&abort_msg, line_buf, sizeof(line_buf)) == 0) {
+                send_all(ss_fd, line_buf, strlen(line_buf));
+            }
+            close(ss_fd);
+            return -1;
+        }
+        // trim newline
+        size_t len = strlen(input);
+        while (len > 0 && (input[len-1] == '\n' || input[len-1] == '\r')) {
+            input[--len] = '\0';
+        }
+        if (len == 0) {
+            continue;
+        }
+        if (strcasecmp(input, "ETIRW") == 0) {
+            Message done_msg = {0};
+            (void)snprintf(done_msg.type, sizeof(done_msg.type), "%s", "WRITE_DONE");
+            (void)snprintf(done_msg.id, sizeof(done_msg.id), "%ld", (long)time(NULL));
+            (void)snprintf(done_msg.username, sizeof(done_msg.username), "%s", g_username);
+            (void)snprintf(done_msg.role, sizeof(done_msg.role), "%s", "CLIENT");
+            done_msg.payload[0] = '\0';
+            if (proto_format_line(&done_msg, line_buf, sizeof(line_buf)) != 0 ||
+                send_all(ss_fd, line_buf, strlen(line_buf)) != 0) {
+                printf("Error: Failed to send ETIRW\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            int n = recv_line(ss_fd, line_buf, sizeof(line_buf));
+            if (n <= 0) {
+                printf("Error: No response after ETIRW\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            Message resp;
+            if (proto_parse_line(line_buf, &resp) != 0) {
+                printf("Error: Failed to parse response\n");
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            if (strcmp(resp.type, "ERROR") == 0) {
+                char error_code[64];
+                char error_msg[256];
+                if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                                      error_msg, sizeof(error_msg)) == 0) {
+                    printf("ERROR [%s]: %s\n", error_code, error_msg);
+                } else {
+                    printf("ERROR: %s\n", resp.payload);
+                }
+                fflush(stdout);
+                close(ss_fd);
+                return -1;
+            }
+            if (strcmp(resp.type, "ACK") == 0) {
+                if (strlen(resp.payload) > 0) {
+                    printf("%s\n", resp.payload);
+                } else {
+                    printf("Write Successful!\n");
+                }
+                fflush(stdout);
+            }
+            close(ss_fd);
+            return 0;
+        }
+
+        char *space = strchr(input, ' ');
+        if (!space) {
+            printf("Error: Provide '<word_index> <content>'\n");
+            fflush(stdout);
+            continue;
+        }
+        *space = '\0';
+        char *content = space + 1;
+        while (*content == ' ') content++;
+        if (*content == '\0') {
+            printf("Error: Content cannot be empty\n");
+            fflush(stdout);
+            continue;
+        }
+        int word_index = atoi(input);
+        Message edit_msg = {0};
+        (void)snprintf(edit_msg.type, sizeof(edit_msg.type), "%s", "WRITE_EDIT");
+        (void)snprintf(edit_msg.id, sizeof(edit_msg.id), "%ld", (long)time(NULL));
+        (void)snprintf(edit_msg.username, sizeof(edit_msg.username), "%s", g_username);
+        (void)snprintf(edit_msg.role, sizeof(edit_msg.role), "%s", "CLIENT");
+        (void)snprintf(edit_msg.payload, sizeof(edit_msg.payload), "%d|%s", word_index, content);
+        if (proto_format_line(&edit_msg, line_buf, sizeof(line_buf)) != 0 ||
+            send_all(ss_fd, line_buf, strlen(line_buf)) != 0) {
+            printf("Error: Failed to send edit\n");
+            fflush(stdout);
+            close(ss_fd);
+            return -1;
+        }
+        int n = recv_line(ss_fd, line_buf, sizeof(line_buf));
+        if (n <= 0) {
+            printf("Error: Connection closed during WRITE\n");
+            fflush(stdout);
+            close(ss_fd);
+            return -1;
+        }
+        Message resp;
+        if (proto_parse_line(line_buf, &resp) != 0) {
+            printf("Error: Failed to parse response\n");
+            fflush(stdout);
+            close(ss_fd);
+            return -1;
+        }
+        if (strcmp(resp.type, "ERROR") == 0) {
+            char error_code[64];
+            char error_msg[256];
+            if (proto_parse_error(&resp, error_code, sizeof(error_code),
+                                  error_msg, sizeof(error_msg)) == 0) {
+                printf("ERROR [%s]: %s\n", error_code, error_msg);
+            } else {
+                printf("ERROR: %s\n", resp.payload);
+            }
+            fflush(stdout);
+            continue;
+        }
+        if (strcmp(resp.type, "ACK") == 0 && strlen(resp.payload) > 0) {
+            printf("%s\n", resp.payload);
+            fflush(stdout);
+        }
+    }
+    close(ss_fd);
     return 0;
 }
 
