@@ -1,9 +1,5 @@
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"ss_scan_start","msg":"scanning storage directory: ./storage_ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"ss_scan_complete","msg":"found 7 files"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"ss_registered","msg":"payload=host=127.0.0.1,client_port=6001,storage=./storage_ss1,files=wowy.txt,test.txt,tt.txt,test1.txt,wow,new.txt,hi.txt"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"ss_ready","msg":"SS running - heartbeat and command handler active"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"ss_listen","msg":"listening on 127.0.0.1:6001 for commands"}
-{"ts":"2025-11-19T07:35:12","level":"INFO","event":"ss_cmd_create","msg":"file=test2.txt owner=inesh"}
-{"ts":"2025-11-19T07:35:12","level":"INFO","event":"ss_file_created","msg":"file=test2.txt"}
-{"ts":"2025-11-19T07:35:50","level":"INFO","event":"ss_cmd_get_acl","msg":"file=test2.txt requester=NM"}
-{"ts":"2025-11-19T07:35:50","level":"INFO","event":"ss_acl_sent","msg":"file=test2.txt requester=NM"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_scan_start","msg":"scanning storage directory: ./storage_ss1"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_scan_complete","msg":"found 1 files"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_registered","msg":"payload=host=127.0.0.1,client_port=6001,storage=./storage_ss1,files=hello.txt"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_ready","msg":"SS running - heartbeat and command handler active"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"ss_listen","msg":"listening on 127.0.0.1:6001 for commands"}

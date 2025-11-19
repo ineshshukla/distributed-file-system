@@ -1,30 +1,21 @@
-{"ts":"2025-11-19T07:34:44","level":"INFO","event":"nm_index_init","msg":"File index initialized"}
-{"ts":"2025-11-19T07:34:44","level":"INFO","event":"nm_listen","msg":"host=127.0.0.1 port=5000"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=wowy.txt ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=test.txt ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=tt.txt ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=test1.txt ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=wow ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=new.txt ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_file_indexed","msg":"file=hi.txt ss=ss1 owner=ss1"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_ss_register","msg":"ip=127.0.0.1 user=ss1 files=7 indexed"}
-{"ts":"2025-11-19T07:34:45","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:34:47","level":"INFO","event":"nm_client_register","msg":"ip=127.0.0.1 user=alice"}
-{"ts":"2025-11-19T07:34:50","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:34:56","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:01","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:02","level":"INFO","event":"nm_client_register","msg":"ip=127.0.0.1 user=inesh"}
-{"ts":"2025-11-19T07:35:06","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:11","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:12","level":"INFO","event":"nm_cmd_create","msg":"user=inesh file=test2.txt"}
-{"ts":"2025-11-19T07:35:12","level":"INFO","event":"nm_file_created","msg":"file=test2.txt owner=inesh"}
-{"ts":"2025-11-19T07:35:16","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:21","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:27","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:32","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:37","level":"INFO","event":"nm_client_register","msg":"ip=127.0.0.1 user=user3"}
-{"ts":"2025-11-19T07:35:37","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:42","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:47","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
-{"ts":"2025-11-19T07:35:50","level":"INFO","event":"nm_cmd_addaccess","msg":"user=user3 file=test2.txt target=alice flag=R"}
-{"ts":"2025-11-19T07:35:52","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:21","level":"INFO","event":"nm_index_init","msg":"File index initialized"}
+{"ts":"2025-11-19T07:52:21","level":"INFO","event":"nm_listen","msg":"host=127.0.0.1 port=5000"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"nm_file_indexed","msg":"file=hello.txt ss=ss1 owner=ss1"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"nm_ss_register","msg":"ip=127.0.0.1 user=ss1 files=1 indexed"}
+{"ts":"2025-11-19T07:52:22","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:24","level":"INFO","event":"nm_client_register","msg":"ip=127.0.0.1 user=alice"}
+{"ts":"2025-11-19T07:52:27","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:32","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:36","level":"INFO","event":"nm_cmd_info","msg":"user=alice file=hello.txt"}
+{"ts":"2025-11-19T07:52:37","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:42","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:48","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:50","level":"ERROR","event":"nm_unknown_msg","msg":"type=LISR"}
+{"ts":"2025-11-19T07:52:53","level":"INFO","event":"nm_cmd_list","msg":"user=alice"}
+{"ts":"2025-11-19T07:52:53","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:52:58","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:53:03","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:53:08","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:53:13","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:53:19","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
+{"ts":"2025-11-19T07:53:24","level":"INFO","event":"nm_heartbeat","msg":"user=ss1"}
