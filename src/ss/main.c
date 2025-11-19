@@ -967,7 +967,7 @@ int main(int argc, char **argv) {
     // Build file list string for registration payload
     // Format: "host=IP,client_port=PORT,storage=DIR,files=file1.txt,file2.txt,..."
     char file_list[4096];
-    if (build_file_list_string(&scan_result, file_list, sizeof(file_list)) != 0) {
+    if (build_file_list_string(&scan_result, ctx.storage_dir, file_list, sizeof(file_list)) != 0) {
         log_error("ss_scan_error", "file list too large, truncating");
         file_list[0] = '\0';  // Empty list if too many files
     }

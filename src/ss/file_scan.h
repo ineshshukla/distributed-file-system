@@ -55,7 +55,8 @@ ScanResult scan_directory(const char *storage_dir, const char *files_dir);
 //   char file_list[4096];
 //   build_file_list_string(&result, file_list, sizeof(file_list));
 //   // file_list now contains: "file1.txt,file2.txt,..."
-int build_file_list_string(const ScanResult *result, char *buf, size_t buflen);
+int build_file_list_string(const ScanResult *result, const char *storage_dir,
+                           char *buf, size_t buflen);
 
 #endif
 

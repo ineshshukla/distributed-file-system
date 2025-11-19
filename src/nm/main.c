@@ -64,24 +64,50 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
                 char *file_list = strdup(files_start);  // Make copy for parsing
                 if (file_list) {
                     char *saveptr = NULL;
-                    char *filename = strtok_r(file_list, ",", &saveptr);
+                    char *entry_str = strtok_r(file_list, ",", &saveptr);
                     
-                    while (filename) {
-                        // Index this file without setting owner (will be loaded from metadata when needed)
-                        // Note: Real owner is stored in metadata on SS
-                        // The owner will be loaded when:
-                        //   1. User creates the file (CREATE command sets owner)
-                        //   2. File is accessed (owner loaded from SS metadata)
-                        // printf("DEBUG:: message details: %s %s", msg->username, msg->payload);
-                        // printf("DEBUG: Indexing file=%s from SS=%s\n", filename, msg->username);
-                        FileEntry *entry = index_add_file(filename, NULL, ss_host, 
+                    while (entry_str) {
+                        char filename_buf[256] = {0};
+                        char owner_buf[64] = {0};
+                        size_t size_bytes = 0;
+                        int words = 0;
+                        int chars = 0;
+
+                        char *field_ptr = NULL;
+                        char *field = strtok_r(entry_str, "|", &field_ptr);
+                        if (field) {
+                            strncpy(filename_buf, field, sizeof(filename_buf) - 1);
+                        }
+                        field = strtok_r(NULL, "|", &field_ptr);
+                        if (field && *field) {
+                            strncpy(owner_buf, field, sizeof(owner_buf) - 1);
+                        }
+                        field = strtok_r(NULL, "|", &field_ptr);
+                        if (field) {
+                            size_bytes = (size_t)strtoull(field, NULL, 10);
+                        }
+                        field = strtok_r(NULL, "|", &field_ptr);
+                        if (field) {
+                            words = atoi(field);
+                        }
+                        field = strtok_r(NULL, "|", &field_ptr);
+                        if (field) {
+                            chars = atoi(field);
+                        }
+
+                        const char *final_owner = (owner_buf[0] != '\0') ? owner_buf : msg->username;
+
+                        FileEntry *entry = index_add_file(filename_buf, final_owner, ss_host, 
                                                           ss_client_port, msg->username);
                         if (entry) {
+                            entry->size_bytes = size_bytes;
+                            entry->word_count = words;
+                            entry->char_count = chars;
                             file_count++;
                             log_info("nm_file_indexed", "file=%s ss=%s owner=%s", 
-                                     filename, msg->username, entry->owner);
+                                     filename_buf, msg->username, entry->owner);
                         }
-                        filename = strtok_r(NULL, ",", &saveptr);
+                        entry_str = strtok_r(NULL, ",", &saveptr);
                     }
                     
                     free(file_list);

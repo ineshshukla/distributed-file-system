@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "file_storage.h"
+
 // Scan the storage directory for existing files
 // This is called during SS startup to discover what files already exist
 ScanResult scan_directory(const char *storage_dir, const char *files_dir) {
@@ -74,8 +76,9 @@ ScanResult scan_directory(const char *storage_dir, const char *files_dir) {
 
 // Build a comma-separated file list string from scan results
 // This string is sent to NM in the SS_REGISTER payload
-int build_file_list_string(const ScanResult *result, char *buf, size_t buflen) {
-    if (!result || !buf || buflen == 0) return -1;
+int build_file_list_string(const ScanResult *result, const char *storage_dir,
+                           char *buf, size_t buflen) {
+    if (!result || !buf || buflen == 0 || !storage_dir) return -1;
     
     // Start with empty string
     buf[0] = '\0';
@@ -89,21 +92,38 @@ int build_file_list_string(const ScanResult *result, char *buf, size_t buflen) {
     // Build comma-separated list: "file1.txt,file2.txt,file3.txt"
     for (int i = 0; i < result->count; i++) {
         const char *filename = result->files[i].filename;
-        size_t filename_len = strlen(filename);
-        
-        // Check if we have space (need space for filename + comma + null terminator)
-        // If this is the last file, no comma needed
-        size_t needed = filename_len + ((i < result->count - 1) ? 1 : 0);
-        if (pos + needed + 1 >= buflen) {
-            // Buffer too small - truncate
+
+        FileMetadata meta = {0};
+        char owner[64] = {0};
+        size_t size_bytes = 0;
+        int words = 0;
+        int chars = 0;
+        if (metadata_load(storage_dir, filename, &meta) == 0) {
+            snprintf(owner, sizeof(owner), "%s", meta.owner);
+            size_bytes = meta.size_bytes;
+            words = meta.word_count;
+            chars = meta.char_count;
+        }
+
+        char entry[512];
+        int entry_len = snprintf(entry, sizeof(entry), "%s|%s|%zu|%d|%d",
+                                 filename,
+                                 owner,
+                                 size_bytes,
+                                 words,
+                                 chars);
+        if (entry_len < 0) {
             return -1;
         }
-        
-        // Append filename
-        strcpy(buf + pos, filename);
-        pos += filename_len;
-        
-        // Append comma if not last file
+
+        size_t needed = (size_t)entry_len + ((i < result->count - 1) ? 1 : 0);
+        if (pos + needed + 1 >= buflen) {
+            return -1;
+        }
+
+        memcpy(buf + pos, entry, (size_t)entry_len);
+        pos += (size_t)entry_len;
+
         if (i < result->count - 1) {
             buf[pos++] = ',';
         }
