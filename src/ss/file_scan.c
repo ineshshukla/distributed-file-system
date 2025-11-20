@@ -67,8 +67,11 @@ static void scan_directory_recursive(const char *storage_dir, const char *rel_pa
             file->size_bytes = (size_t)st.st_size;
             
             // Check if metadata file exists
+            // Normalize filename (strip leading slash) for metadata path
+            const char *norm_filename = file->filename;
+            if (norm_filename[0] == '/') norm_filename++;
             char meta_path[1024];
-            snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, file->filename);
+            snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, norm_filename);
             file->has_metadata = (access(meta_path, F_OK) == 0) ? 1 : 0;
             
             result->count++;

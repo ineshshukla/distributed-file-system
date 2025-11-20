@@ -35,7 +35,22 @@ static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
     (void)snprintf(req.id, sizeof(req.id), "%s", "1");
     (void)snprintf(req.username, sizeof(req.username), "%s", "NM");
     (void)snprintf(req.role, sizeof(req.role), "%s", "NM");
-    (void)snprintf(req.payload, sizeof(req.payload), "%s", entry->filename);
+    
+    // Build full path: folder_path + filename
+    char full_path[768];
+    if (strcmp(entry->folder_path, "/") == 0) {
+        snprintf(full_path, sizeof(full_path), "%s", entry->filename);
+    } else {
+        // Remove trailing / from folder_path for display
+        size_t folder_len = strlen(entry->folder_path);
+        if (folder_len > 0 && entry->folder_path[folder_len - 1] == '/') {
+            snprintf(full_path, sizeof(full_path), "%.*s/%s", 
+                     (int)(folder_len - 1), entry->folder_path, entry->filename);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", entry->folder_path, entry->filename);
+        }
+    }
+    (void)snprintf(req.payload, sizeof(req.payload), "%s", full_path);
 
     char req_buf[MAX_LINE];
     if (proto_format_line(&req, req_buf, sizeof(req_buf)) != 0) {
@@ -880,11 +895,15 @@ int handle_read(int client_fd, const char *username, const char *filename) {
     }
     
     // Lookup file in index
+    log_info("nm_read_lookup", "file=%s user=%s", filename, username);
     FileEntry *entry = index_lookup_file(filename);
     if (!entry) {
+        log_error("nm_read_not_found", "file=%s user=%s", filename, username);
         Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
         return send_error_response(client_fd, "", username, &err);
     }
+    
+    log_info("nm_read_found", "file=%s folder=%s basename=%s", filename, entry->folder_path, entry->filename);
 
     // Load ACL from SS and check read access
     ACL acl = {0};

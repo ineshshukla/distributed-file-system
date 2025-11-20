@@ -166,7 +166,8 @@ FileEntry *index_add_file(const char *filename, const char *owner,
     entry->char_count = 0;
     
     // Add to hash map
-    unsigned int hash = index_hash(filename);
+    // Hash the base filename (not the full path) for consistent lookups
+    unsigned int hash = index_hash(entry->filename);
     entry->next = g_file_index.buckets[hash];
     g_file_index.buckets[hash] = entry;
     g_file_index.count++;

@@ -45,11 +45,23 @@ static int copy_file_atomic(const char *src, const char *dst) {
     return result;
 }
 
+// Helper: Normalize filename by removing leading slash
+// Files are stored without leading slash (e.g., "documents/a.txt" not "/documents/a.txt")
+static const char *normalize_filename(const char *filename) {
+    if (!filename) return filename;
+    // Skip leading slash if present
+    if (filename[0] == '/') {
+        return filename + 1;
+    }
+    return filename;
+}
+
 static void build_undo_paths(const char *storage_dir, const char *filename,
                              char *meta_path, size_t meta_len,
                              char *data_path, size_t data_len) {
-    snprintf(meta_path, meta_len, "%s/metadata/%s.undo.meta", storage_dir, filename);
-    snprintf(data_path, data_len, "%s/metadata/%s.undo.data", storage_dir, filename);
+    const char *norm_filename = normalize_filename(filename);
+    snprintf(meta_path, meta_len, "%s/metadata/%s.undo.meta", storage_dir, norm_filename);
+    snprintf(data_path, data_len, "%s/metadata/%s.undo.data", storage_dir, norm_filename);
 }
 
 // Helper: Ensure directories exist (create if they don't)
@@ -91,8 +103,10 @@ int file_create(const char *storage_dir, const char *filename, const char *owner
     }
     
     // Build paths (filename may include folder path)
+    // Normalize filename (remove leading slash if present)
+    const char *norm_filename = normalize_filename(filename);
     char file_path[512];
-    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, norm_filename);
     
     // Check if file already exists
     if (access(file_path, F_OK) == 0) {
@@ -148,8 +162,10 @@ int file_read(const char *storage_dir, const char *filename,
     if (!storage_dir || !filename || !content_buf || buf_size == 0) return -1;
     
     // Build file path
+    const char *norm_filename = normalize_filename(filename);
     char file_path[512];
-    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, norm_filename);
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, norm_filename);
     
     // Open file for reading
     FILE *fp = fopen(file_path, "r");
@@ -217,10 +233,11 @@ int file_delete(const char *storage_dir, const char *filename) {
     if (!storage_dir || !filename) return -1;
     
     // Build paths
+    const char *norm_filename = normalize_filename(filename);
     char file_path[512];
     char meta_path[512];
-    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
-    snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, filename);
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, norm_filename);
+    snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, norm_filename);
     
     // Delete file (unlink returns 0 on success)
     int file_ok = (unlink(file_path) == 0 || errno == ENOENT);
@@ -242,8 +259,9 @@ int file_delete(const char *storage_dir, const char *filename) {
 int file_exists(const char *storage_dir, const char *filename) {
     if (!storage_dir || !filename) return 0;
     
+    const char *norm_filename = normalize_filename(filename);
     char file_path[512];
-    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, norm_filename);
     
     return (access(file_path, F_OK) == 0) ? 1 : 0;
 }
@@ -255,8 +273,9 @@ int metadata_load(const char *storage_dir, const char *filename, FileMetadata *m
     if (!storage_dir || !filename || !metadata) return -1;
     
     // Build metadata file path
+    const char *norm_filename = normalize_filename(filename);
     char meta_path[512];
-    snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, filename);
+    snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, norm_filename);
     
     // Open metadata file
     FILE *fp = fopen(meta_path, "r");
@@ -399,9 +418,10 @@ int metadata_save(const char *storage_dir, const char *filename, const FileMetad
     mkdir(meta_dir, 0755);
     
     // Build paths
+    const char *norm_filename = normalize_filename(filename);
     char meta_path[512];
     char tmp_path[520];  // Slightly larger to accommodate ".tmp"
-    int n = snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, filename);
+    int n = snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, norm_filename);
     if (n < 0 || (size_t)n >= sizeof(meta_path)) {
         return -1;  // Path too long
     }
