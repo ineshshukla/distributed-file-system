@@ -9,8 +9,13 @@
 
 #include <stddef.h>
 
-// Types we currently use in Phase 1:
-//   SS_REGISTER, CLIENT_REGISTER, HEARTBEAT, ACK, ERROR
+// Message Types:
+//   Registration: SS_REGISTER, CLIENT_REGISTER
+//   Status: HEARTBEAT, ACK, ERROR
+//   File Operations: CREATE, DELETE, READ, WRITE, STREAM, INFO, UNDO, EXEC
+//   User Operations: VIEW, LIST, ADDACCESS, REMACCESS
+//   Folder Operations: CREATE_FOLDER/CREATEFOLDER, MOVE, VIEWFOLDER/VIEW_FOLDER
+//   Internal: DATA, STOP, GET_FILE, GET_ACL, UPDATE_ACL
 
 #define MAX_LINE 2048
 

@@ -9,6 +9,75 @@
 
 #include "file_storage.h"
 
+// Helper: Recursively scan a directory and its subdirectories
+static void scan_directory_recursive(const char *storage_dir, const char *rel_path, 
+                                    const char *files_base, ScanResult *result) {
+    if (!storage_dir || !rel_path || !files_base || !result) return;
+    if (result->count >= MAX_FILES_PER_SS) return;
+    
+    // Build full path to current directory
+    char dir_path[768];
+    snprintf(dir_path, sizeof(dir_path), "%s/%s", files_base, rel_path);
+    
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+    
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL && result->count < MAX_FILES_PER_SS) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        // Build full path to this entry
+        char entry_path[1024];
+        snprintf(entry_path, sizeof(entry_path), "%s/%s", dir_path, entry->d_name);
+        
+        struct stat st;
+        if (stat(entry_path, &st) != 0) {
+            continue;
+        }
+        
+        // If it's a directory, recurse into it
+        if (S_ISDIR(st.st_mode)) {
+            char new_rel_path[768];
+            if (strcmp(rel_path, "") == 0) {
+                snprintf(new_rel_path, sizeof(new_rel_path), "%s", entry->d_name);
+            } else {
+                snprintf(new_rel_path, sizeof(new_rel_path), "%s/%s", rel_path, entry->d_name);
+            }
+            scan_directory_recursive(storage_dir, new_rel_path, files_base, result);
+        }
+        // If it's a regular file, add it to results
+        else if (S_ISREG(st.st_mode)) {
+            ScannedFile *file = &result->files[result->count];
+            
+            // Store relative path including folder structure
+            if (strcmp(rel_path, "") == 0) {
+                size_t len = strlen(entry->d_name);
+                if (len >= sizeof(file->filename)) len = sizeof(file->filename) - 1;
+                memcpy(file->filename, entry->d_name, len);
+                file->filename[len] = '\0';
+            } else {
+                int n = snprintf(file->filename, sizeof(file->filename), "/%s/%s", rel_path, entry->d_name);
+                if (n < 0 || (size_t)n >= sizeof(file->filename)) {
+                    // Path too long, skip
+                    continue;
+                }
+            }
+            file->size_bytes = (size_t)st.st_size;
+            
+            // Check if metadata file exists
+            char meta_path[1024];
+            snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, file->filename);
+            file->has_metadata = (access(meta_path, F_OK) == 0) ? 1 : 0;
+            
+            result->count++;
+        }
+    }
+    
+    closedir(dir);
+}
+
 // Scan the storage directory for existing files
 // This is called during SS startup to discover what files already exist
 ScanResult scan_directory(const char *storage_dir, const char *files_dir) {
@@ -19,58 +88,17 @@ ScanResult scan_directory(const char *storage_dir, const char *files_dir) {
     char files_path[512];
     snprintf(files_path, sizeof(files_path), "%s/%s", storage_dir, files_dir);
     
-    // Open the directory for reading
+    // Check if directory exists
     DIR *dir = opendir(files_path);
     if (!dir) {
         // Directory doesn't exist yet - that's OK, just return empty result
-        // The directory will be created when first file is created
         return result;
     }
-    
-    // Read each entry in the directory
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && result.count < MAX_FILES_PER_SS) {
-        // Skip special entries: "." (current directory) and ".." (parent directory)
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        
-        // Build full path to this file
-        // Note: files_path can be up to 512, entry->d_name up to 255, so we need 768
-        char file_path[768];
-        int n = snprintf(file_path, sizeof(file_path), "%s/%s", files_path, entry->d_name);
-        if (n < 0 || (size_t)n >= sizeof(file_path)) {
-            // Path too long - skip this file
-            continue;
-        }
-        
-        // Get file information using stat()
-        struct stat st;
-        if (stat(file_path, &st) != 0) {
-            // Can't stat this file - skip it
-            continue;
-        }
-        
-        // Only process regular files (not directories or symlinks)
-        if (!S_ISREG(st.st_mode)) {
-            continue;
-        }
-        
-        // Store file information in result
-        ScannedFile *file = &result.files[result.count];
-        (void)snprintf(file->filename, sizeof(file->filename), "%s", entry->d_name);
-        file->size_bytes = (size_t)st.st_size;
-        
-        // Check if metadata file exists
-        // Metadata files are stored in: storage_dir/metadata/filename.meta
-        char meta_path[512];
-        snprintf(meta_path, sizeof(meta_path), "%s/metadata/%s.meta", storage_dir, entry->d_name);
-        file->has_metadata = (access(meta_path, F_OK) == 0) ? 1 : 0;
-        
-        result.count++;
-    }
-    
     closedir(dir);
+    
+    // Recursively scan the directory and all subdirectories
+    scan_directory_recursive(storage_dir, "", files_path, &result);
+    
     return result;
 }
 

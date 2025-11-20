@@ -32,6 +32,7 @@ typedef struct {
 // File metadata structure - stores all information about a file
 typedef struct {
     char owner[64];           // Username of file owner
+    char folder_path[512];    // Folder path where file is located (e.g., "/" or "/folder1/")
     time_t created;           // Creation timestamp
     time_t last_modified;     // Last modification timestamp
     time_t last_accessed;     // Last access timestamp
@@ -197,6 +198,30 @@ int metadata_ensure_sentences(const char *storage_dir, const char *filename, Fil
 int undo_save_state(const char *storage_dir, const char *filename);
 int undo_restore_state(const char *storage_dir, const char *filename);
 int undo_exists(const char *storage_dir, const char *filename);
+
+// ===== Folder Operations =====
+
+// Create a folder (directory) on the storage server
+// storage_dir: Base storage directory (e.g., "./storage_ss1")
+// folder_path: Full folder path (e.g., "/folder1/subfolder/")
+// Returns: 0 on success, -1 on error
+//
+// This function creates the directory structure in both files/ and metadata/
+// Example: folder_path="/a/b/" creates:
+//   storage_dir/files/a/b/
+//   storage_dir/metadata/a/b/
+int folder_create(const char *storage_dir, const char *folder_path);
+
+// Move a file from one folder to another
+// storage_dir: Base storage directory
+// filename: Name of the file (without path)
+// old_folder_path: Current folder path (e.g., "/folder1/")
+// new_folder_path: Destination folder path (e.g., "/folder2/")
+// Returns: 0 on success, -1 on error
+//
+// This moves both the file and its metadata to the new location
+int file_move(const char *storage_dir, const char *filename,
+              const char *old_folder_path, const char *new_folder_path);
 
 #endif
 

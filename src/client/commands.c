@@ -116,6 +116,25 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
             payload[0] = '\0';
         }
     }
+    // For MOVE: filename|new_folder_path
+    else if (strcmp(cmd->cmd, "MOVE") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For CREATE_FOLDER, CREATEFOLDER, VIEWFOLDER, VIEW_FOLDER
+    else if (strcmp(cmd->cmd, "CREATEFOLDER") == 0 || 
+             strcmp(cmd->cmd, "CREATE_FOLDER") == 0 ||
+             strcmp(cmd->cmd, "VIEWFOLDER") == 0 ||
+             strcmp(cmd->cmd, "VIEW_FOLDER") == 0) {
+        if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';
+        }
+    }
     // For commands with arguments (CREATE, DELETE, INFO, READ, STREAM, UNDO, EXEC, etc.)
     else if (cmd->argc > 0) {
         // First argument is the filename (or whatever the command needs)

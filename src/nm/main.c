@@ -104,6 +104,12 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
                             entry->word_count = words;
                             entry->char_count = chars;
                             file_count++;
+                            
+                            // Auto-register folder if file has a folder path
+                            if (strcmp(entry->folder_path, "/") != 0) {
+                                index_add_folder(entry->folder_path, msg->username);
+                            }
+                            
                             log_info("nm_file_indexed", "file=%s ss=%s owner=%s", 
                                      filename_buf, msg->username, entry->owner);
                         }
@@ -380,6 +386,48 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         log_info("nm_cmd_remaccess", "user=%s file=%s target=%s", 
                  msg->username, filename, target_user);
         handle_remaccess(fd, msg->username, filename, target_user);
+        return;
+    }
+    
+    // Handle CREATE_FOLDER
+    if (strcmp(msg->type, "CREATE_FOLDER") == 0 || strcmp(msg->type, "CREATEFOLDER") == 0) {
+        const char *folder_path = msg->payload;
+        log_info("nm_cmd_createfolder", "user=%s folder=%s", msg->username, folder_path);
+        handle_createfolder(fd, msg->username, folder_path);
+        return;
+    }
+    
+    // Handle MOVE
+    if (strcmp(msg->type, "MOVE") == 0) {
+        // Payload format: "filename|new_folder_path"
+        char filename[512] = {0};
+        char new_folder[512] = {0};
+        
+        const char *sep = strchr(msg->payload, '|');
+        if (sep) {
+            size_t fname_len = sep - msg->payload;
+            if (fname_len < sizeof(filename)) {
+                memcpy(filename, msg->payload, fname_len);
+                filename[fname_len] = '\0';
+            }
+            
+            size_t folder_len = strlen(sep + 1);
+            if (folder_len < sizeof(new_folder)) {
+                memcpy(new_folder, sep + 1, folder_len);
+                new_folder[folder_len] = '\0';
+            }
+        }
+        
+        log_info("nm_cmd_move", "user=%s file=%s to=%s", msg->username, filename, new_folder);
+        handle_move(fd, msg->username, filename, new_folder);
+        return;
+    }
+    
+    // Handle VIEWFOLDER
+    if (strcmp(msg->type, "VIEWFOLDER") == 0 || strcmp(msg->type, "VIEW_FOLDER") == 0) {
+        const char *folder_path = msg->payload;
+        log_info("nm_cmd_viewfolder", "user=%s folder=%s", msg->username, folder_path);
+        handle_viewfolder(fd, msg->username, folder_path);
         return;
     }
     

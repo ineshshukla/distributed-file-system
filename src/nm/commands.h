@@ -191,5 +191,61 @@ int send_success_response(int client_fd, const char *id, const char *username,
 int send_data_response(int client_fd, const char *id, const char *username,
                       const char *data);
 
+// ===== Folder Command Handlers =====
+
+// Handle CREATE_FOLDER command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client
+// folder_path: Path of folder to create (e.g., "/folder1/subfolder/")
+// Returns: 0 on success, -1 on error
+//
+// CREATE_FOLDER command: Creates a new folder
+//
+// This function:
+// 1. Validates folder path (must start with /, no .., etc.)
+// 2. Checks if folder already exists (return CONFLICT if yes)
+// 3. Selects appropriate SS
+// 4. Sends CREATE_FOLDER command to SS
+// 5. Waits for ACK from SS
+// 6. Adds folder to index
+// 7. Sends success response to client
+int handle_createfolder(int client_fd, const char *username, const char *folder_path);
+
+// Handle MOVE command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client
+// filename: Name of file to move (with current folder path)
+// new_folder_path: Destination folder path
+// Returns: 0 on success, -1 on error
+//
+// MOVE command: Moves a file from one folder to another
+//
+// This function:
+// 1. Looks up file in index (return NOT_FOUND if not exists)
+// 2. Checks if user has write access (return UNAUTHORIZED if not)
+// 3. Validates destination folder exists
+// 4. Sends MOVE command to SS
+// 5. Waits for ACK from SS
+// 6. Updates file's folder_path in index
+// 7. Sends success response to client
+int handle_move(int client_fd, const char *username, const char *filename,
+                const char *new_folder_path);
+
+// Handle VIEWFOLDER command
+// client_fd: File descriptor to send response to
+// username: Username of requesting client
+// folder_path: Path of folder to view
+// Returns: 0 on success, -1 on error
+//
+// VIEWFOLDER command: Lists contents of a folder
+//
+// This function:
+// 1. Checks if folder exists (return NOT_FOUND if not)
+// 2. Gets all files in folder from index
+// 3. Gets all subfolders in folder from index
+// 4. Formats output with files and folders
+// 5. Sends response to client
+int handle_viewfolder(int client_fd, const char *username, const char *folder_path);
+
 #endif
 

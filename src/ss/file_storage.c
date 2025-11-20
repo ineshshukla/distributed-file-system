@@ -74,7 +74,23 @@ int file_create(const char *storage_dir, const char *filename, const char *owner
     // Ensure directories exist
     ensure_directories(storage_dir);
     
-    // Build paths
+    // Parse filename to extract folder path
+    char folder_path[512] = "/";
+    const char *last_slash = strrchr(filename, '/');
+    if (last_slash) {
+        size_t folder_len = last_slash - filename + 1;
+        if (folder_len < sizeof(folder_path)) {
+            memcpy(folder_path, filename, folder_len);
+            folder_path[folder_len] = '\0';
+        }
+        
+        // Create folder structure if it doesn't exist
+        if (strcmp(folder_path, "/") != 0) {
+            folder_create(storage_dir, folder_path);
+        }
+    }
+    
+    // Build paths (filename may include folder path)
     char file_path[512];
     snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
     
@@ -93,7 +109,16 @@ int file_create(const char *storage_dir, const char *filename, const char *owner
     
     // Create metadata
     FileMetadata meta = {0};
-    strncpy(meta.owner, owner, sizeof(meta.owner) - 1);
+    size_t owner_len = strlen(owner);
+    if (owner_len >= sizeof(meta.owner)) owner_len = sizeof(meta.owner) - 1;
+    memcpy(meta.owner, owner, owner_len);
+    meta.owner[owner_len] = '\0';
+    
+    size_t folder_len = strlen(folder_path);
+    if (folder_len >= sizeof(meta.folder_path)) folder_len = sizeof(meta.folder_path) - 1;
+    memcpy(meta.folder_path, folder_path, folder_len);
+    meta.folder_path[folder_len] = '\0';
+    
     time_t now = time(NULL);
     meta.created = now;
     meta.last_modified = now;
@@ -569,6 +594,135 @@ int undo_restore_state(const char *storage_dir, const char *filename) {
     }
     unlink(undo_meta);
     unlink(undo_data);
+    return 0;
+}
+
+// ===== Folder Operations =====
+
+// Helper function to create nested directories recursively
+static int mkdir_recursive(const char *path) {
+    char tmp[512];
+    char *p = NULL;
+    size_t len;
+    
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    len = strlen(tmp);
+    if (tmp[len - 1] == '/') {
+        tmp[len - 1] = '\0';
+    }
+    
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    return mkdir(tmp, 0755);
+}
+
+// Create a folder (directory) on the storage server
+int folder_create(const char *storage_dir, const char *folder_path) {
+    if (!storage_dir || !folder_path) return -1;
+    
+    // Ensure base directories exist
+    ensure_directories(storage_dir);
+    
+    // Remove leading / from folder_path for building paths
+    const char *rel_path = folder_path;
+    if (rel_path[0] == '/') rel_path++;
+    
+    // Build paths for files/ and metadata/ directories
+    char files_folder[512];
+    char meta_folder[512];
+    
+    snprintf(files_folder, sizeof(files_folder), "%s/files/%s", storage_dir, rel_path);
+    snprintf(meta_folder, sizeof(meta_folder), "%s/metadata/%s", storage_dir, rel_path);
+    
+    // Create directories (recursive)
+    if (mkdir_recursive(files_folder) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    if (mkdir_recursive(meta_folder) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Move a file from one folder to another
+int file_move(const char *storage_dir, const char *filename,
+              const char *old_folder_path, const char *new_folder_path) {
+    if (!storage_dir || !filename || !old_folder_path || !new_folder_path) return -1;
+    
+    // Ensure new folder exists
+    if (strcmp(new_folder_path, "/") != 0) {
+        folder_create(storage_dir, new_folder_path);
+    }
+    
+    // Build old and new file paths
+    char old_file_path[512];
+    char new_file_path[512];
+    char old_meta_path[512];
+    char new_meta_path[512];
+    
+    // Build full paths (old_folder_path and new_folder_path include leading /)
+    const char *old_rel = old_folder_path[0] == '/' ? old_folder_path + 1 : old_folder_path;
+    const char *new_rel = new_folder_path[0] == '/' ? new_folder_path + 1 : new_folder_path;
+    
+    // Handle root folder case
+    if (strcmp(old_folder_path, "/") == 0) {
+        snprintf(old_file_path, sizeof(old_file_path), "%s/files/%s", storage_dir, filename);
+        snprintf(old_meta_path, sizeof(old_meta_path), "%s/metadata/%s.meta", storage_dir, filename);
+    } else {
+        snprintf(old_file_path, sizeof(old_file_path), "%s/files/%s%s", storage_dir, old_rel, filename);
+        snprintf(old_meta_path, sizeof(old_meta_path), "%s/metadata/%s%s.meta", storage_dir, old_rel, filename);
+    }
+    
+    if (strcmp(new_folder_path, "/") == 0) {
+        snprintf(new_file_path, sizeof(new_file_path), "%s/files/%s", storage_dir, filename);
+        snprintf(new_meta_path, sizeof(new_meta_path), "%s/metadata/%s.meta", storage_dir, filename);
+    } else {
+        snprintf(new_file_path, sizeof(new_file_path), "%s/files/%s%s", storage_dir, new_rel, filename);
+        snprintf(new_meta_path, sizeof(new_meta_path), "%s/metadata/%s%s.meta", storage_dir, new_rel, filename);
+    }
+    
+    // Check if old file exists
+    if (access(old_file_path, F_OK) != 0) {
+        return -1;  // File doesn't exist
+    }
+    
+    // Move file (rename)
+    if (rename(old_file_path, new_file_path) != 0) {
+        return -1;
+    }
+    
+    // Move metadata
+    if (access(old_meta_path, F_OK) == 0) {
+        // Update folder_path in metadata
+        FileMetadata meta;
+        if (metadata_load(storage_dir, filename, &meta) == 0) {
+            strncpy(meta.folder_path, new_folder_path, sizeof(meta.folder_path) - 1);
+            meta.folder_path[sizeof(meta.folder_path) - 1] = '\0';
+        }
+        
+        if (rename(old_meta_path, new_meta_path) != 0) {
+            // Rollback file move
+            rename(new_file_path, old_file_path);
+            return -1;
+        }
+        
+        // Save updated metadata with new folder path
+        // Note: metadata_save expects filename with folder path
+        char full_filename[768];
+        if (strcmp(new_folder_path, "/") == 0) {
+            snprintf(full_filename, sizeof(full_filename), "%s", filename);
+        } else {
+            snprintf(full_filename, sizeof(full_filename), "%s%s", new_folder_path, filename);
+        }
+        metadata_save(storage_dir, full_filename, &meta);
+    }
+    
     return 0;
 }
 

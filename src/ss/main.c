@@ -292,6 +292,97 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
             }
             close(client_fd);
         }
+        // Handle CREATE_FOLDER command
+        else if (strcmp(cmd_msg.type, "CREATE_FOLDER") == 0) {
+            const char *folder_path = cmd_msg.payload;
+            
+            log_info("ss_cmd_create_folder", "folder=%s", folder_path);
+            
+            // Create folder
+            if (folder_create(ctx->storage_dir, folder_path) == 0) {
+                // Send ACK
+                Message ack = {0};
+                (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "folder_created");
+                
+                char ack_line[MAX_LINE];
+                proto_format_line(&ack, ack_line, sizeof(ack_line));
+                send_all(client_fd, ack_line, strlen(ack_line));
+                
+                log_info("ss_folder_created", "folder=%s", folder_path);
+            } else {
+                // Send error
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "INTERNAL", "Failed to create folder",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                log_error("ss_create_folder_failed", "folder=%s", folder_path);
+            }
+            close(client_fd);
+        }
+        // Handle MOVE command
+        else if (strcmp(cmd_msg.type, "MOVE") == 0) {
+            // Payload format: "filename|old_folder_path|new_folder_path"
+            char filename[256] = {0};
+            char old_folder[512] = {0};
+            char new_folder[512] = {0};
+            
+            // Parse payload
+            const char *p1 = strchr(cmd_msg.payload, '|');
+            if (p1) {
+                size_t fname_len = p1 - cmd_msg.payload;
+                if (fname_len < sizeof(filename)) {
+                    memcpy(filename, cmd_msg.payload, fname_len);
+                    filename[fname_len] = '\0';
+                }
+                
+                const char *p2 = strchr(p1 + 1, '|');
+                if (p2) {
+                    size_t old_len = p2 - (p1 + 1);
+                    if (old_len < sizeof(old_folder)) {
+                        memcpy(old_folder, p1 + 1, old_len);
+                        old_folder[old_len] = '\0';
+                    }
+                    
+                    size_t new_len = strlen(p2 + 1);
+                    if (new_len < sizeof(new_folder)) {
+                        strcpy(new_folder, p2 + 1);
+                    }
+                }
+            }
+            
+            log_info("ss_cmd_move", "file=%s from=%s to=%s", filename, old_folder, new_folder);
+            
+            // Move file
+            if (file_move(ctx->storage_dir, filename, old_folder, new_folder) == 0) {
+                // Send ACK
+                Message ack = {0};
+                (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+                (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "file_moved");
+                
+                char ack_line[MAX_LINE];
+                proto_format_line(&ack, ack_line, sizeof(ack_line));
+                send_all(client_fd, ack_line, strlen(ack_line));
+                
+                log_info("ss_file_moved", "file=%s from=%s to=%s", filename, old_folder, new_folder);
+            } else {
+                // Send error
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "NOT_FOUND", "File not found or move failed",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                log_error("ss_move_failed", "file=%s", filename);
+            }
+            close(client_fd);
+        }
         // Handle READ command (from client)
         else if (strcmp(cmd_msg.type, "READ") == 0) {
             const char *filename = cmd_msg.payload;
