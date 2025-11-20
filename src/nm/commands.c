@@ -13,6 +13,8 @@
 #include "../common/log.h"
 #include "registry.h"
 
+#define MAX_SS_CANDIDATES 64
+
 static int get_ss_connection_for_file(const FileEntry *entry);
 static int fetch_file_content_from_ss(const FileEntry *entry, char **content_out);
 static int execute_script_text(const char *script_text, char **output_out, char *error_buf, size_t error_len);
@@ -456,12 +458,6 @@ static int load_owner_from_ss(FileEntry *entry) {
 
 // Helper: Select SS for new file (round-robin or first available)
 // Returns: SS username, or NULL if no SS available
-static const char *select_ss_for_new_file(void) {
-    const char *least = registry_get_least_loaded_ss();
-    if (least) return least;
-    return registry_get_first_ss();
-}
-
 // Handle VIEW command
 int handle_view(int client_fd, const char *username, const char *flags) {
     // printf("DEBUG: handle_view called with username=%s flags=%s\n", username, flags);
@@ -614,59 +610,69 @@ int handle_create(int client_fd, const char *username, const char *filename) {
         return send_error_response(client_fd, "", username, &err);
     }
     
-    // Select SS for new file
-    const char *ss_username = select_ss_for_new_file();
-    if (!ss_username) {
+    char ss_candidates[MAX_SS_CANDIDATES][64] = {{0}};
+    int ss_count = registry_get_ss_candidates(ss_candidates, MAX_SS_CANDIDATES);
+    if (ss_count <= 0) {
         Error err = error_simple(ERR_UNAVAILABLE, "No storage server available");
         return send_error_response(client_fd, "", username, &err);
     }
-    
-    // Find SS connection
-    int ss_fd = find_ss_connection(ss_username);
-    if (ss_fd < 0) {
-        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to storage server");
-        return send_error_response(client_fd, "", username, &err);
-    }
-    
-    // Send CREATE command to SS
-    Message create_cmd = {0};
-    (void)snprintf(create_cmd.type, sizeof(create_cmd.type), "%s", "CREATE");
-    (void)snprintf(create_cmd.id, sizeof(create_cmd.id), "%s", "1");
-    (void)snprintf(create_cmd.username, sizeof(create_cmd.username), "%s", username);
-    (void)snprintf(create_cmd.role, sizeof(create_cmd.role), "%s", "NM");
-    (void)snprintf(create_cmd.payload, sizeof(create_cmd.payload), "%s", filename);
-    
-    char cmd_line[MAX_LINE];
-    proto_format_line(&create_cmd, cmd_line, sizeof(cmd_line));
-    if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+
+    char selected_ss[64] = {0};
+    Message ss_resp = {0};
+
+    for (int i = 0; i < ss_count; i++) {
+        const char *candidate = ss_candidates[i];
+        int ss_fd = find_ss_connection(candidate);
+        if (ss_fd < 0) {
+            log_error("nm_create_connect", "Cannot reach SS %s", candidate);
+            continue;
+        }
+
+        Message create_cmd = {0};
+        (void)snprintf(create_cmd.type, sizeof(create_cmd.type), "%s", "CREATE");
+        (void)snprintf(create_cmd.id, sizeof(create_cmd.id), "%s", "1");
+        (void)snprintf(create_cmd.username, sizeof(create_cmd.username), "%s", username);
+        (void)snprintf(create_cmd.role, sizeof(create_cmd.role), "%s", "NM");
+        (void)snprintf(create_cmd.payload, sizeof(create_cmd.payload), "%s", filename);
+
+        char cmd_line[MAX_LINE];
+        proto_format_line(&create_cmd, cmd_line, sizeof(cmd_line));
+        if (send_all(ss_fd, cmd_line, strlen(cmd_line)) != 0) {
+            log_error("nm_create_send", "Failed to send CREATE to SS %s", candidate);
+            close(ss_fd);
+            continue;
+        }
+
+        char resp_buf[MAX_LINE];
+        int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
         close(ss_fd);
-        Error err = error_simple(ERR_INTERNAL, "Failed to send command to storage server");
-        return send_error_response(client_fd, "", username, &err);
+
+        if (n <= 0) {
+            log_error("nm_create_resp", "No response from SS %s", candidate);
+            continue;
+        }
+
+        if (proto_parse_line(resp_buf, &ss_resp) != 0) {
+            log_error("nm_create_resp", "Invalid response from SS %s", candidate);
+            continue;
+        }
+
+        if (strcmp(ss_resp.type, "ERROR") == 0) {
+            char error_code[64];
+            char error_msg[256];
+            proto_parse_error(&ss_resp, error_code, sizeof(error_code),
+                              error_msg, sizeof(error_msg));
+            Error err = error_simple(ERR_INTERNAL, error_msg);
+            return send_error_response(client_fd, "", username, &err);
+        }
+
+        strncpy(selected_ss, candidate, sizeof(selected_ss) - 1);
+        selected_ss[sizeof(selected_ss) - 1] = '\0';
+        break;
     }
-    
-    // Wait for ACK from SS
-    char resp_buf[MAX_LINE];
-    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
-    close(ss_fd);
-    
-    if (n <= 0) {
-        Error err = error_simple(ERR_INTERNAL, "No response from storage server");
-        return send_error_response(client_fd, "", username, &err);
-    }
-    
-    Message ss_resp;
-    if (proto_parse_line(resp_buf, &ss_resp) != 0) {
-        Error err = error_simple(ERR_INTERNAL, "Invalid response from storage server");
-        return send_error_response(client_fd, "", username, &err);
-    }
-    
-    // Check if SS returned error
-    if (strcmp(ss_resp.type, "ERROR") == 0) {
-        char error_code[64];
-        char error_msg[256];
-        proto_parse_error(&ss_resp, error_code, sizeof(error_code),
-                         error_msg, sizeof(error_msg));
-        Error err = error_simple(ERR_INTERNAL, error_msg);
+
+    if (selected_ss[0] == '\0') {
+        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to any storage server");
         return send_error_response(client_fd, "", username, &err);
     }
     
@@ -678,10 +684,10 @@ int handle_create(int client_fd, const char *username, const char *filename) {
     char ss_host[64] = {0};
     int ss_client_port = 0;
     
-    if (registry_get_ss_info(ss_username, ss_host, sizeof(ss_host), &ss_client_port) == 0) {
+    if (registry_get_ss_info(selected_ss, ss_host, sizeof(ss_host), &ss_client_port) == 0) {
         if (!entry) {
             // File not in index - add it
-            entry = index_add_file(filename, username, ss_host, ss_client_port, ss_username);
+            entry = index_add_file(filename, username, ss_host, ss_client_port, selected_ss);
         } else {
             // File exists in index (probably from SS registration with owner=ss1)
             // Update the owner to the actual creator
@@ -696,11 +702,11 @@ int handle_create(int client_fd, const char *username, const char *filename) {
     if (entry) {
         // Auto-register folder if file has a folder path
         if (strcmp(entry->folder_path, "/") != 0) {
-            index_add_folder(entry->folder_path, ss_username);
+            index_add_folder(entry->folder_path, selected_ss);
         }
         
         log_info("nm_file_created", "file=%s owner=%s", filename, entry->owner);
-        registry_adjust_ss_file_count(ss_username, 1);
+        registry_adjust_ss_file_count(selected_ss, 1);
         return send_success_response(client_fd, "", username, "File Created Successfully!");
     } else {
         Error err = error_simple(ERR_INTERNAL, "Failed to index file");

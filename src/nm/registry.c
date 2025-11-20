@@ -5,6 +5,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct {
+    char username[64];
+    int file_count;
+} SsCandidate;
+
+static int compare_ss_candidates(const void *a, const void *b) {
+    const SsCandidate *ca = (const SsCandidate*)a;
+    const SsCandidate *cb = (const SsCandidate*)b;
+    if (ca->file_count == cb->file_count) {
+        return strcmp(ca->username, cb->username);
+    }
+    return (ca->file_count < cb->file_count) ? -1 : 1;
+}
+
 // Global registry (thread-safe)
 static RegistryEntry *g_registry_head = NULL;
 static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -132,6 +146,55 @@ int registry_get_clients(char clients[][64], int max_clients) {
     }
     pthread_mutex_unlock(&g_registry_mu);
     return count;
+}
+
+int registry_get_ss_candidates(char usernames[][64], int max_entries) {
+    if (!usernames || max_entries <= 0) return 0;
+
+    pthread_mutex_lock(&g_registry_mu);
+    int ss_count = 0;
+    RegistryEntry *entry = g_registry_head;
+    while (entry) {
+        if (strcmp(entry->role, "SS") == 0) {
+            ss_count++;
+        }
+        entry = entry->next;
+    }
+
+    if (ss_count == 0) {
+        pthread_mutex_unlock(&g_registry_mu);
+        return 0;
+    }
+
+    SsCandidate *candidates = (SsCandidate*)calloc(ss_count, sizeof(SsCandidate));
+    if (!candidates) {
+        pthread_mutex_unlock(&g_registry_mu);
+        return 0;
+    }
+
+    entry = g_registry_head;
+    int idx = 0;
+    while (entry) {
+        if (strcmp(entry->role, "SS") == 0 && idx < ss_count) {
+            strncpy(candidates[idx].username, entry->username, sizeof(candidates[idx].username) - 1);
+            candidates[idx].username[sizeof(candidates[idx].username) - 1] = '\0';
+            candidates[idx].file_count = entry->file_count;
+            idx++;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&g_registry_mu);
+
+    qsort(candidates, idx, sizeof(SsCandidate), compare_ss_candidates);
+
+    int copy_count = (idx < max_entries) ? idx : max_entries;
+    for (int i = 0; i < copy_count; i++) {
+        strncpy(usernames[i], candidates[i].username, 63);
+        usernames[i][63] = '\0';
+    }
+
+    free(candidates);
+    return copy_count;
 }
 
 void registry_set_ss_file_count(const char *ss_username, int count) {

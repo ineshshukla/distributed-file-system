@@ -32,6 +32,9 @@ int registry_get_ss_info(const char *ss_username, char *host, size_t host_len,
 // Fills provided array and returns count
 int registry_get_clients(char clients[][64], int max_clients);
 
+// Retrieve SS usernames sorted by ascending file count (lower first)
+int registry_get_ss_candidates(char usernames[][64], int max_entries);
+
 void registry_set_ss_file_count(const char *ss_username, int count);
 void registry_adjust_ss_file_count(const char *ss_username, int delta);
 
