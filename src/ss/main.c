@@ -1022,19 +1022,53 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
                 return;
             }
             
-            // Send content
-            Message ack = {0};
-            snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
-            snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
-            snprintf(ack.username, sizeof(ack.username), "%s", username);
-            snprintf(ack.role, sizeof(ack.role), "%s", "SS");
-            snprintf(ack.payload, sizeof(ack.payload), "%.*s", 
-                    (int)(sizeof(ack.payload) - 1), content);
+            // Send checkpoint content using DATA messages (same as READ)
+            // Replace newlines with \x01 (SOH) to avoid breaking line-based protocol
+            size_t content_pos = 0;
+            size_t content_len = actual_size;
             
-            char ack_line[MAX_LINE];
-            proto_format_line(&ack, ack_line, sizeof(ack_line));
-            send_all(client_fd, ack_line, strlen(ack_line));
-            log_info("ss_viewcheckpoint_success", "file=%s tag=%s", filename, tag);
+            while (content_pos < content_len) {
+                Message data_msg = {0};
+                snprintf(data_msg.type, sizeof(data_msg.type), "%s", "DATA");
+                snprintf(data_msg.id, sizeof(data_msg.id), "%s", cmd_msg.id);
+                snprintf(data_msg.username, sizeof(data_msg.username), "%s", username);
+                snprintf(data_msg.role, sizeof(data_msg.role), "%s", "SS");
+                
+                // Copy chunk, replacing \n with \x01
+                size_t payload_pos = 0;
+                size_t payload_max = sizeof(data_msg.payload) - 1;
+                
+                while (content_pos < content_len && payload_pos < payload_max) {
+                    if (content[content_pos] == '\n') {
+                        data_msg.payload[payload_pos++] = '\x01';
+                    } else {
+                        data_msg.payload[payload_pos++] = content[content_pos];
+                    }
+                    content_pos++;
+                }
+                data_msg.payload[payload_pos] = '\0';
+                
+                char data_buf[MAX_LINE];
+                if (proto_format_line(&data_msg, data_buf, sizeof(data_buf)) == 0) {
+                    send_all(client_fd, data_buf, strlen(data_buf));
+                }
+            }
+            
+            // Send STOP packet
+            Message stop_msg = {0};
+            snprintf(stop_msg.type, sizeof(stop_msg.type), "%s", "STOP");
+            snprintf(stop_msg.id, sizeof(stop_msg.id), "%s", cmd_msg.id);
+            snprintf(stop_msg.username, sizeof(stop_msg.username), "%s", username);
+            snprintf(stop_msg.role, sizeof(stop_msg.role), "%s", "SS");
+            stop_msg.payload[0] = '\0';
+            
+            char stop_buf[MAX_LINE];
+            if (proto_format_line(&stop_msg, stop_buf, sizeof(stop_buf)) == 0) {
+                send_all(client_fd, stop_buf, strlen(stop_buf));
+            }
+            
+            log_info("ss_viewcheckpoint_success", "file=%s tag=%s size=%zu", 
+                    filename, tag, actual_size);
             close(client_fd);
             return;
         }
@@ -1146,41 +1180,85 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
                 return;
             }
             
+            log_info("ss_listcheckpoints_loaded", "count=%d", count);
+            
             // Format checkpoint list
-            char list_buf[1700];  // Fit in payload
+            // Payload max is 1792 bytes, leave some room for safety
+            char list_buf[1750];
             int offset = 0;
+            
+            log_info("ss_listcheckpoints_formatting", "count=%d", count);
             
             if (count == 0) {
                 (void)snprintf(list_buf, sizeof(list_buf),
                               "No checkpoints found");
             } else {
-                for (int i = 0; i < count && offset < (int)sizeof(list_buf) - 100; i++) {
+                for (int i = 0; i < count; i++) {
+                    log_info("ss_listcheckpoints_entry", "i=%d tag=%s creator=%s size=%zu", 
+                            i, entries[i].tag, entries[i].creator, entries[i].file_size);
+                    
                     char time_str[32];
                     struct tm *tm_info = localtime(&entries[i].timestamp);
                     strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
                     
-                    offset += snprintf(list_buf + offset, sizeof(list_buf) - offset,
-                                      "%s|%s|%s|%zu",
-                                      entries[i].tag,
-                                      entries[i].creator,
-                                      time_str,
-                                      entries[i].file_size);
+                    // Calculate how much space we need for this entry
+                    char temp_entry[200];
+                    int entry_len = snprintf(temp_entry, sizeof(temp_entry),
+                                            "%s|%s|%s|%zu",
+                                            entries[i].tag,
+                                            entries[i].creator,
+                                            time_str,
+                                            entries[i].file_size);
                     
+                    log_info("ss_listcheckpoints_entry_formatted", "i=%d entry_len=%d temp_entry=%s", 
+                            i, entry_len, temp_entry);
+                    
+                    // Check if we have enough space (including newline if not last)
+                    int space_needed = entry_len + ((i < count - 1) ? 1 : 0);
+                    if (offset + space_needed >= (int)sizeof(list_buf) - 1) {
+                        // Not enough space, stop here
+                        log_info("ss_listcheckpoints_truncated", "Listed %d of %d checkpoints at offset=%d", i, count, offset);
+                        break;
+                    }
+                    
+                    // Add the entry
+                    offset += snprintf(list_buf + offset, sizeof(list_buf) - offset,
+                                      "%s", temp_entry);
+                    
+                    log_info("ss_listcheckpoints_after_entry", "i=%d offset=%d", i, offset);
+                    
+                    // Add newline if not the last entry
                     if (i < count - 1) {
                         offset += snprintf(list_buf + offset, sizeof(list_buf) - offset, "\n");
+                        log_info("ss_listcheckpoints_after_newline", "i=%d offset=%d", i, offset);
                     }
                 }
             }
             
+            log_info("ss_listcheckpoints_buffer_done", "offset=%d list_buf=%s", offset, list_buf);
+            
             free(entries);
             
-            // Send list
+            // Send list - encode newlines as \x01 to avoid breaking protocol
             Message ack = {0};
             snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
             snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
             snprintf(ack.username, sizeof(ack.username), "%s", username);
             snprintf(ack.role, sizeof(ack.role), "%s", "SS");
-            snprintf(ack.payload, sizeof(ack.payload), "%s", list_buf);
+            
+            // Replace newlines with \x01 in the payload
+            size_t buf_pos = 0;
+            size_t payload_max = sizeof(ack.payload) - 1;
+            for (int i = 0; list_buf[i] != '\0' && buf_pos < payload_max; i++) {
+                if (list_buf[i] == '\n') {
+                    ack.payload[buf_pos++] = '\x01';
+                } else {
+                    ack.payload[buf_pos++] = list_buf[i];
+                }
+            }
+            ack.payload[buf_pos] = '\0';
+            
+            log_info("ss_listcheckpoints_payload", "payload=%s", ack.payload);
             
             char ack_line[MAX_LINE];
             proto_format_line(&ack, ack_line, sizeof(ack_line));

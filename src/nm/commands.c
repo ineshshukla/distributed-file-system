@@ -2159,18 +2159,37 @@ int handle_viewcheckpoint(int client_fd, const char *username, const char *filen
         return send_error_response(client_fd, "", username, &err);
     }
 
-    // Receive response from SS
-    char ss_resp[MAX_LINE];
-    if (recv_line(ss_fd, ss_resp, sizeof(ss_resp)) <= 0) {
-        close(ss_fd);
-        Error err = error_simple(ERR_INTERNAL, "No response from SS");
-        return send_error_response(client_fd, "", username, &err);
+    // Relay all DATA messages from SS to client until STOP
+    log_info("nm_viewcheckpoint", "user=%s file=%s tag=%s", username, filename, tag);
+    while (1) {
+        char ss_resp[MAX_LINE];
+        int n = recv_line(ss_fd, ss_resp, sizeof(ss_resp));
+        if (n <= 0) {
+            close(ss_fd);
+            Error err = error_simple(ERR_INTERNAL, "Connection to SS closed unexpectedly");
+            return send_error_response(client_fd, "", username, &err);
+        }
+        
+        // Forward message to client
+        if (send_all(client_fd, ss_resp, strlen(ss_resp)) != 0) {
+            close(ss_fd);
+            return -1;
+        }
+        
+        // Check if this is a STOP message
+        Message msg;
+        if (proto_parse_line(ss_resp, &msg) == 0) {
+            if (strcmp(msg.type, "STOP") == 0) {
+                break;
+            }
+            // If ERROR, also stop
+            if (strcmp(msg.type, "ERROR") == 0) {
+                break;
+            }
+        }
     }
     close(ss_fd);
-
-    // Forward response to client
-    log_info("nm_viewcheckpoint", "user=%s file=%s tag=%s", username, filename, tag);
-    return send_all(client_fd, ss_resp, strlen(ss_resp));
+    return 0;
 }
 
 int handle_revert_checkpoint(int client_fd, const char *username, const char *filename, const char *tag) {

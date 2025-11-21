@@ -78,6 +78,7 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
         // Special handling for LISTCHECKPOINTS - format nicely
         if (strcmp(cmd->cmd, "LISTCHECKPOINTS") == 0 && strlen(resp.payload) > 0) {
             // Payload format: tag|creator|timestamp|filesize (one per line)
+            // Newlines are encoded as \x01
             if (strstr(resp.payload, "No checkpoints") != NULL) {
                 printf("%s\n", resp.payload);
             } else {
@@ -88,6 +89,11 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
                 
                 char *payload_copy = strdup(resp.payload);
                 if (payload_copy) {
+                    // Convert \x01 back to \n
+                    for (char *p = payload_copy; *p; p++) {
+                        if (*p == '\x01') *p = '\n';
+                    }
+                    
                     char *saveptr = NULL;
                     char *line = strtok_r(payload_copy, "\n", &saveptr);
                     while (line) {
@@ -113,10 +119,6 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
                 printf("------------------------------------------------------------\n");
             }
         }
-        // Special handling for VIEWCHECKPOINT - just print content
-        else if (strcmp(cmd->cmd, "VIEWCHECKPOINT") == 0 && strlen(resp.payload) > 0) {
-            printf("%s\n", resp.payload);
-        }
         else if (strlen(resp.payload) > 0) {
             printf("%s\n", resp.payload);
         } else {
@@ -125,7 +127,8 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
         fflush(stdout);
     } else if (strcmp(resp.type, "DATA") == 0) {
         print_payload_with_newlines(resp.payload);
-        if (strcmp(cmd->cmd, "EXEC") == 0) {
+        // READ, VIEWCHECKPOINT, and EXEC commands use DATA streaming
+        if (strcmp(cmd->cmd, "EXEC") == 0 || strcmp(cmd->cmd, "VIEWCHECKPOINT") == 0) {
             while (1) {
                 int n = recv_line(g_nm_fd, resp_buf, sizeof(resp_buf));
                 if (n <= 0) break;
@@ -148,6 +151,11 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
             }
         }
         fflush(stdout);
+        return 0;  // Return after handling DATA streaming to avoid fall-through
+    } else if (strcmp(resp.type, "STOP") == 0) {
+        // Standalone STOP message (shouldn't normally happen, but handle gracefully)
+        fflush(stdout);
+        return 0;
     } else if (strcmp(resp.type, "SS_INFO") == 0) {
         // SS_INFO response - contains SS connection info for direct connection
         // Payload format: "host=IP,port=PORT"
@@ -709,6 +717,66 @@ static void command_loop(void) {
         if (strcmp(cmd.cmd, "EXIT") == 0) {
             printf("Exiting...\n");
             break;
+        }
+        
+        // Validate command arguments
+        int valid = 1;
+        if (strcmp(cmd.cmd, "CHECKPOINT") == 0) {
+            if (cmd.argc < 2) {
+                printf("ERROR: CHECKPOINT requires 2 arguments: <filename> <checkpoint_tag>\n");
+                printf("Usage: CHECKPOINT <filename> <checkpoint_tag>\n");
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "VIEWCHECKPOINT") == 0) {
+            if (cmd.argc < 2) {
+                printf("ERROR: VIEWCHECKPOINT requires 2 arguments: <filename> <checkpoint_tag>\n");
+                printf("Usage: VIEWCHECKPOINT <filename> <checkpoint_tag>\n");
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "REVERT") == 0) {
+            if (cmd.argc < 2) {
+                printf("ERROR: REVERT requires 2 arguments: <filename> <checkpoint_tag>\n");
+                printf("Usage: REVERT <filename> <checkpoint_tag>\n");
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "LISTCHECKPOINTS") == 0) {
+            if (cmd.argc < 1) {
+                printf("ERROR: LISTCHECKPOINTS requires 1 argument: <filename>\n");
+                printf("Usage: LISTCHECKPOINTS <filename>\n");
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "CREATE") == 0 || strcmp(cmd.cmd, "DELETE") == 0 || 
+                   strcmp(cmd.cmd, "READ") == 0 || strcmp(cmd.cmd, "INFO") == 0 ||
+                   strcmp(cmd.cmd, "STREAM") == 0 || strcmp(cmd.cmd, "UNDO") == 0 ||
+                   strcmp(cmd.cmd, "EXEC") == 0 || strcmp(cmd.cmd, "CREATEFOLDER") == 0 ||
+                   strcmp(cmd.cmd, "VIEWFOLDER") == 0) {
+            if (cmd.argc < 1) {
+                printf("ERROR: %s requires 1 argument: <filename>\n", cmd.cmd);
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "WRITE") == 0) {
+            if (cmd.argc < 2) {
+                printf("ERROR: WRITE requires 2 arguments: <filename> <sentence_number>\n");
+                printf("Usage: WRITE <filename> <sentence_number>\n");
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "ADDACCESS") == 0) {
+            if (cmd.argc < 2 || !cmd.has_flags) {
+                printf("ERROR: ADDACCESS requires flag and 2 arguments: <filename> <username>\n");
+                printf("Usage: ADDACCESS -R <filename> <username> or ADDACCESS -W <filename> <username>\n");
+                valid = 0;
+            }
+        } else if (strcmp(cmd.cmd, "REMACCESS") == 0 || strcmp(cmd.cmd, "MOVE") == 0) {
+            if (cmd.argc < 2) {
+                printf("ERROR: %s requires 2 arguments\n", cmd.cmd);
+                valid = 0;
+            }
+        }
+        
+        if (!valid) {
+            printf("> ");
+            fflush(stdout);
+            continue;
         }
         
         // Send command and receive response
