@@ -38,6 +38,9 @@ void sentence_lock_release_all(const char *filename, int session_id);
 // Remove locks older than cutoff seconds (used by watchdog).
 void sentence_lock_cleanup(time_t cutoff_seconds);
 
+// Returns 1 if any sentence locks exist for the file.
+int runtime_state_has_active_locks(const char *filename);
+
 #endif  // RUNTIME_STATE_H
 
 

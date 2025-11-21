@@ -367,6 +367,11 @@ int write_session_apply_edit(WriteSession *session,
     return 0;
 }
 
+char *write_session_get_current_text(const WriteSession *session) {
+    if (!session || !session->active) return NULL;
+    return sentence_entry_to_string(&session->sentence_entry);
+}
+
 static int write_updated_file(WriteSession *session,
                               SentenceCollection *file_col,
                               FileMetadata *meta,
