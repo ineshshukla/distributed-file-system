@@ -15,15 +15,92 @@
 #include "access_requests.h"
 
 #define MAX_SS_CANDIDATES 64
+#define ACL_CACHE_CAPACITY 256
+#define ACL_CACHE_KEY_MAX 768
+
+typedef struct {
+    char path[ACL_CACHE_KEY_MAX];
+    ACL acl;
+    int valid;
+} AclCacheEntry;
+
+static AclCacheEntry g_acl_cache[ACL_CACHE_CAPACITY];
+static int g_acl_cache_next_slot = 0;
+static pthread_mutex_t g_acl_cache_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static int get_ss_connection_for_file(const FileEntry *entry);
 static int fetch_file_content_from_ss(const FileEntry *entry, char **content_out);
 static int execute_script_text(const char *script_text, char **output_out, char *error_buf, size_t error_len);
 static int send_streaming_response(int client_fd, const char *id, const char *username, const char *text);
 
-// Helper: Fetch ACL from storage server
+static void build_full_path(const FileEntry *entry, char *full_path, size_t len) {
+    if (!entry || !full_path || len == 0) return;
+    if (strcmp(entry->folder_path, "/") == 0) {
+        snprintf(full_path, len, "%s", entry->filename);
+    } else {
+        size_t folder_len = strlen(entry->folder_path);
+        if (folder_len > 0 && entry->folder_path[folder_len - 1] == '/') {
+            snprintf(full_path, len, "%.*s/%s",
+                     (int)(folder_len - 1), entry->folder_path, entry->filename);
+        } else {
+            snprintf(full_path, len, "%s/%s", entry->folder_path, entry->filename);
+        }
+    }
+}
+
+static int acl_cache_get(const char *path, ACL *acl_out) {
+    if (!path || !acl_out) return -1;
+    pthread_mutex_lock(&g_acl_cache_mu);
+    for (int i = 0; i < ACL_CACHE_CAPACITY; i++) {
+        if (g_acl_cache[i].valid && strcmp(g_acl_cache[i].path, path) == 0) {
+            *acl_out = g_acl_cache[i].acl;
+            pthread_mutex_unlock(&g_acl_cache_mu);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_acl_cache_mu);
+    return -1;
+}
+
+static void acl_cache_put(const char *path, const ACL *acl) {
+    if (!path || !acl) return;
+    pthread_mutex_lock(&g_acl_cache_mu);
+    // Update existing entry if present
+    for (int i = 0; i < ACL_CACHE_CAPACITY; i++) {
+        if (g_acl_cache[i].valid && strcmp(g_acl_cache[i].path, path) == 0) {
+            g_acl_cache[i].acl = *acl;
+            pthread_mutex_unlock(&g_acl_cache_mu);
+            return;
+        }
+    }
+    AclCacheEntry *slot = &g_acl_cache[g_acl_cache_next_slot];
+    snprintf(slot->path, sizeof(slot->path), "%s", path);
+    slot->acl = *acl;
+    slot->valid = 1;
+    g_acl_cache_next_slot = (g_acl_cache_next_slot + 1) % ACL_CACHE_CAPACITY;
+    pthread_mutex_unlock(&g_acl_cache_mu);
+}
+
+static void acl_cache_invalidate(const char *path) {
+    if (!path) return;
+    pthread_mutex_lock(&g_acl_cache_mu);
+    for (int i = 0; i < ACL_CACHE_CAPACITY; i++) {
+        if (g_acl_cache[i].valid && strcmp(g_acl_cache[i].path, path) == 0) {
+            g_acl_cache[i].valid = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_acl_cache_mu);
+}
+
+// Helper: Fetch ACL from storage server (with cache)
 static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
     if (!entry || !acl_out) return -1;
+
+    char full_path[ACL_CACHE_KEY_MAX];
+    build_full_path(entry, full_path, sizeof(full_path));
+    if (acl_cache_get(full_path, acl_out) == 0) {
+        return 0;
+    }
 
     int ss_fd = get_ss_connection_for_file(entry);
     if (ss_fd < 0) {
@@ -38,19 +115,6 @@ static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
     (void)snprintf(req.role, sizeof(req.role), "%s", "NM");
     
     // Build full path: folder_path + filename
-    char full_path[768];
-    if (strcmp(entry->folder_path, "/") == 0) {
-        snprintf(full_path, sizeof(full_path), "%s", entry->filename);
-    } else {
-        // Remove trailing / from folder_path for display
-        size_t folder_len = strlen(entry->folder_path);
-        if (folder_len > 0 && entry->folder_path[folder_len - 1] == '/') {
-            snprintf(full_path, sizeof(full_path), "%.*s/%s", 
-                     (int)(folder_len - 1), entry->folder_path, entry->filename);
-        } else {
-            snprintf(full_path, sizeof(full_path), "%s/%s", entry->folder_path, entry->filename);
-        }
-    }
     (void)snprintf(req.payload, sizeof(req.payload), "%s", full_path);
 
     char req_buf[MAX_LINE];
@@ -100,6 +164,7 @@ static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
         return -1;
     }
 
+    acl_cache_put(full_path, acl_out);
     return 0;
 }
 
@@ -401,6 +466,9 @@ static int load_owner_from_ss(FileEntry *entry) {
         return 0;  // Already has owner
     }
     
+    char full_path[ACL_CACHE_KEY_MAX];
+    build_full_path(entry, full_path, sizeof(full_path));
+
     // Connect to SS
     int ss_fd = get_ss_connection_for_file(entry);
     if (ss_fd < 0) {
@@ -751,6 +819,9 @@ int handle_delete(int client_fd, const char *username, const char *filename) {
         Error err = error_create(ERR_UNAUTHORIZED, "User '%s' is not the owner of file '%s'", username, filename);
         return send_error_response(client_fd, "", username, &err);
     }
+
+    char full_path[ACL_CACHE_KEY_MAX];
+    build_full_path(entry, full_path, sizeof(full_path));
     
     // Connect to SS
     int ss_fd = get_ss_connection_for_file(entry);
@@ -808,6 +879,8 @@ int handle_delete(int client_fd, const char *username, const char *filename) {
         
         // Remove any pending access requests for this file
         request_queue_remove_by_filename(entry->filename, entry->folder_path);
+
+        acl_cache_invalidate(full_path);
         
         return send_success_response(client_fd, "", username, "File deleted successfully!");
     } else {
@@ -1200,7 +1273,11 @@ int handle_addaccess(int client_fd, const char *username, const char *flag,
     }
     
     // Success
-    log_info("nm_access_granted", "file=%s owner=%s target=%s flag=%s", 
+    char full_path[ACL_CACHE_KEY_MAX];
+    build_full_path(entry, full_path, sizeof(full_path));
+    acl_cache_invalidate(full_path);
+
+    log_info("nm_access_granted", "file=%s owner=%s target=%s flag=%s",
              filename, username, target_username, flag);
     return send_success_response(client_fd, "", username, "Access granted successfully!");
 }
@@ -1284,7 +1361,11 @@ int handle_remaccess(int client_fd, const char *username,
     }
     
     // Success
-    log_info("nm_access_removed", "file=%s owner=%s target=%s", 
+    char full_path[ACL_CACHE_KEY_MAX];
+    build_full_path(entry, full_path, sizeof(full_path));
+    acl_cache_invalidate(full_path);
+
+    log_info("nm_access_removed", "file=%s owner=%s target=%s",
              filename, username, target_username);
     return send_success_response(client_fd, "", username, "Access removed successfully!");
 }
@@ -1467,6 +1548,9 @@ int handle_move(int client_fd, const char *username, const char *filename,
         return send_error_response(client_fd, "", username, &err);
     }
     
+    char old_path[ACL_CACHE_KEY_MAX];
+    build_full_path(entry, old_path, sizeof(old_path));
+
     // Update index
     index_move_file(entry->filename, entry->folder_path, new_folder_path);
     
@@ -1475,7 +1559,9 @@ int handle_move(int client_fd, const char *username, const char *filename,
     request_queue_update_filename(entry->filename, entry->folder_path,
                                    entry->filename, new_folder_path);
     
-    log_info("nm_file_moved", "file=%s user=%s from=%s to=%s", 
+    acl_cache_invalidate(old_path);
+
+    log_info("nm_file_moved", "file=%s user=%s from=%s to=%s",
              filename, username, entry->folder_path, new_folder_path);
     return send_success_response(client_fd, "", username, "File moved successfully!");
 }
@@ -1948,6 +2034,8 @@ int handle_approveaccessrequest(int client_fd, const char *username, const char 
     
     // Success - remove request from queue
     request_queue_remove(request_id);
+
+    acl_cache_invalidate(full_path);
     
     char msg[1024];
     snprintf(msg, sizeof(msg), "Access granted to %s for file %s", req->requester, full_path);
