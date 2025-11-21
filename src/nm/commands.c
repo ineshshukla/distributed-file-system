@@ -1051,7 +1051,7 @@ int handle_read(int client_fd, const char *username, const char *filename) {
         Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
         return send_error_response(client_fd, "", username, &err);
     }
-    Error access_err = check_file_access(filename, username, 1, &acl);
+    Error access_err = check_file_access(filename, username, 0, &acl);
     if (!error_is_ok(&access_err)) {
         return send_error_response(client_fd, "", username, &access_err);
     }
@@ -1993,11 +1993,12 @@ int handle_approveaccessrequest(int client_fd, const char *username, const char 
     // Build full path for file lookup
     char full_path[768];
     if (strcmp(req->folder_path, "/") == 0) {
-        snprintf(full_path, sizeof(full_path), "/%s", req->filename);
+        snprintf(full_path, sizeof(full_path), "%s", req->filename);
     } else {
         size_t folder_len = strlen(req->folder_path);
         if (folder_len > 0 && req->folder_path[folder_len - 1] == '/') {
-            snprintf(full_path, sizeof(full_path), "%s%s", req->folder_path, req->filename);
+            snprintf(full_path, sizeof(full_path), "%.*s/%s",
+                     (int)(folder_len - 1), req->folder_path, req->filename);
         } else {
             snprintf(full_path, sizeof(full_path), "%s/%s", req->folder_path, req->filename);
         }
@@ -2149,11 +2150,12 @@ int handle_disapproveaccessrequest(int client_fd, const char *username, const ch
     // Build full path to locate file
     char full_path[768];
     if (strcmp(req->folder_path, "/") == 0) {
-        snprintf(full_path, sizeof(full_path), "/%s", req->filename);
+        snprintf(full_path, sizeof(full_path), "%s", req->filename);
     } else {
         size_t folder_len = strlen(req->folder_path);
         if (folder_len > 0 && req->folder_path[folder_len - 1] == '/') {
-            snprintf(full_path, sizeof(full_path), "%s%s", req->folder_path, req->filename);
+            snprintf(full_path, sizeof(full_path), "%.*s/%s",
+                     (int)(folder_len - 1), req->folder_path, req->filename);
         } else {
             snprintf(full_path, sizeof(full_path), "%s/%s", req->folder_path, req->filename);
         }

@@ -58,6 +58,13 @@ run_test() {
     fi
 }
 
+# Helper function to run client command
+run_client_cmd() {
+    local cmd=$1
+    local username=$2
+    echo -e "$cmd\nEXIT" | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username "$username" 2>&1 | grep -v "LangOS Client" | grep -v "^>" | grep -v "Exiting"
+}
+
 # Cleanup function
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
@@ -140,86 +147,87 @@ echo "=========================================="
 
 # [10] View Files
 echo -e "\n${YELLOW}=== Test 1: VIEW command (10 marks) ===${NC}"
-run_test "VIEW - List accessible files" "./bin_client VIEW raju" "bablu.txt\|file2.txt\|\.txt"
-run_test "VIEW -a - List all files" "./bin_client VIEW -a raju" "bablu.txt\|file2.txt"
-run_test "VIEW -l - List with details" "./bin_client VIEW -l raju" "Filename\|Words\|Chars"
-run_test "VIEW -al - List all with details" "./bin_client VIEW -al raju" "Filename\|Words\|Chars"
+run_test "VIEW - List accessible files" "run_client_cmd 'VIEW' raju" "bablu.txt\|file2.txt\|\.txt\|-->"
+run_test "VIEW -a - List all files" "run_client_cmd 'VIEW -a' raju" "bablu.txt\|file2.txt\|-->"
+run_test "VIEW -l - List with details" "run_client_cmd 'VIEW -l' raju" "Filename\|Words\|Chars"
+run_test "VIEW -al - List all with details" "run_client_cmd 'VIEW -al' raju" "Filename\|Words\|Chars"
 
 # [10] Read File
 echo -e "\n${YELLOW}=== Test 2: READ command (10 marks) ===${NC}"
 if [ -f "storage_ss1/files/bablu.txt" ]; then
-    run_test "READ - Read file content" "./bin_client READ bablu.txt raju" "."
+    run_test "READ - Read file content" "run_client_cmd 'READ bablu.txt' raju" "."
 else
     echo "Creating test file for READ test..."
-    ./bin_client CREATE testread.txt raju
-    echo "hello world" | ./bin_client WRITE testread.txt raju 0
-    run_test "READ - Read file content" "./bin_client READ testread.txt raju" "hello\|world"
+    run_client_cmd "CREATE testread.txt" raju
+    echo -e "1 hello world\nETIRW" | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju
+    run_test "READ - Read file content" "run_client_cmd 'READ testread.txt' raju" "hello\|world"
 fi
 
 # [10] Create File
 echo -e "\n${YELLOW}=== Test 3: CREATE command (10 marks) ===${NC}"
-run_test "CREATE - Create new file" "./bin_client CREATE testfile_$(date +%s).txt raju" "success\|created\|Created"
+TEST_CREATE_FILE="testfile_$(date +%s).txt"
+run_test "CREATE - Create new file" "run_client_cmd 'CREATE $TEST_CREATE_FILE' raju" "success\|created\|Created"
 
 # [30] Write to File
 echo -e "\n${YELLOW}=== Test 4: WRITE command (30 marks) ===${NC}"
 TEST_FILE="writetest_$(date +%s).txt"
-./bin_client CREATE $TEST_FILE raju
+run_client_cmd "CREATE $TEST_FILE" raju > /dev/null
 sleep 1
 
 # Test basic write
-run_test "WRITE - Basic write to file" "echo -e '1 Hello world.\nETIRW' | ./bin_client WRITE $TEST_FILE raju 0" "success\|Success\|written"
+run_test "WRITE - Basic write to file" "echo -e 'WRITE $TEST_FILE\n1 Hello world.\nETIRW\nEXIT' | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju 2>&1 | grep -v 'LangOS' | grep -v '^>' | grep -v 'Exiting'" "success\|Success\|written"
 
 # Test sentence insertion
-run_test "WRITE - Insert into sentence" "echo -e '2 beautiful\nETIRW' | ./bin_client WRITE $TEST_FILE raju 0" "success\|Success"
+run_test "WRITE - Insert into sentence" "echo -e 'WRITE $TEST_FILE\n2 beautiful\nETIRW\nEXIT' | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju 2>&1 | grep -v 'LangOS' | grep -v '^>' | grep -v 'Exiting'" "success\|Success"
 
 # Verify content
-run_test "READ after WRITE - Verify content" "./bin_client READ $TEST_FILE raju" "Hello\|beautiful"
+run_test "READ after WRITE - Verify content" "run_client_cmd 'READ $TEST_FILE' raju" "Hello\|beautiful"
 
 # [15] Undo Change
 echo -e "\n${YELLOW}=== Test 5: UNDO command (15 marks) ===${NC}"
-run_test "UNDO - Revert last change" "./bin_client UNDO $TEST_FILE raju" "success\|reverted\|Undo"
+run_test "UNDO - Revert last change" "run_client_cmd 'UNDO $TEST_FILE' raju" "success\|reverted\|Undo"
 
 # [10] Get Info
 echo -e "\n${YELLOW}=== Test 6: INFO command (10 marks) ===${NC}"
-run_test "INFO - Get file metadata" "./bin_client INFO $TEST_FILE raju" "File\|Owner\|Size\|Access"
+run_test "INFO - Get file metadata" "run_client_cmd 'INFO $TEST_FILE' raju" "File\|Owner\|Size\|Access"
 
 # [10] Delete File
 echo -e "\n${YELLOW}=== Test 7: DELETE command (10 marks) ===${NC}"
 DELETE_FILE="deleteme_$(date +%s).txt"
-./bin_client CREATE $DELETE_FILE raju
+run_client_cmd "CREATE $DELETE_FILE" raju > /dev/null
 sleep 1
-run_test "DELETE - Remove file" "./bin_client DELETE $DELETE_FILE raju" "success\|deleted\|Deleted"
+run_test "DELETE - Remove file" "run_client_cmd 'DELETE $DELETE_FILE' raju" "success\|deleted\|Deleted"
 
 # [15] Stream Content
 echo -e "\n${YELLOW}=== Test 8: STREAM command (15 marks) ===${NC}"
 if [ -f "storage_ss1/files/bablu.txt" ]; then
-    run_test "STREAM - Stream file content" "timeout 5 ./bin_client STREAM bablu.txt raju" "."
+    run_test "STREAM - Stream file content" "timeout 5 run_client_cmd 'STREAM bablu.txt' raju" "."
 else
-    run_test "STREAM - Stream file content" "timeout 5 ./bin_client STREAM $TEST_FILE raju" "."
+    run_test "STREAM - Stream file content" "timeout 5 run_client_cmd 'STREAM $TEST_FILE' raju" "."
 fi
 
 # [10] List Users
 echo -e "\n${YELLOW}=== Test 9: LIST command (10 marks) ===${NC}"
-run_test "LIST - List all users" "./bin_client LIST raju" "raju\|user"
+run_test "LIST - List all users" "run_client_cmd 'LIST' raju" "raju\|user"
 
 # [15] Access Control
 echo -e "\n${YELLOW}=== Test 10: ACCESS commands (15 marks) ===${NC}"
 ACCESS_FILE="accesstest_$(date +%s).txt"
-./bin_client CREATE $ACCESS_FILE raju
+run_client_cmd "CREATE $ACCESS_FILE" raju > /dev/null
 sleep 1
 
-run_test "ADDACCESS -R - Grant read access" "./bin_client ADDACCESS -R $ACCESS_FILE raju babu" "success\|granted"
-run_test "ADDACCESS -W - Grant write access" "./bin_client ADDACCESS -W $ACCESS_FILE raju babu" "success\|granted"
-run_test "REMACCESS - Remove access" "./bin_client REMACCESS $ACCESS_FILE raju babu" "success\|removed"
+run_test "ADDACCESS -R - Grant read access" "run_client_cmd 'ADDACCESS -R $ACCESS_FILE babu' raju" "success\|granted"
+run_test "ADDACCESS -W - Grant write access" "run_client_cmd 'ADDACCESS -W $ACCESS_FILE babu' raju" "success\|granted"
+run_test "REMACCESS - Remove access" "run_client_cmd 'REMACCESS $ACCESS_FILE babu' raju" "success\|removed"
 
 # [15] Execute File
 echo -e "\n${YELLOW}=== Test 11: EXEC command (15 marks) ===${NC}"
 EXEC_FILE="exectest_$(date +%s).txt"
-./bin_client CREATE $EXEC_FILE raju
+run_client_cmd "CREATE $EXEC_FILE" raju > /dev/null
 sleep 1
-echo -e "1 echo Hello from exec.\nETIRW" | ./bin_client WRITE $EXEC_FILE raju 0
+echo -e "WRITE $EXEC_FILE\n1 echo Hello from exec.\nETIRW\nEXIT" | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju > /dev/null 2>&1
 sleep 1
-run_test "EXEC - Execute file content" "./bin_client EXEC $EXEC_FILE raju" "Hello from exec"
+run_test "EXEC - Execute file content" "run_client_cmd 'EXEC $EXEC_FILE' raju" "Hello from exec"
 
 echo "=========================================="
 echo "  SYSTEM REQUIREMENTS (40 marks)"
@@ -228,9 +236,9 @@ echo "=========================================="
 # [10] Data Persistence
 echo -e "\n${YELLOW}=== Test 12: Data Persistence (10 marks) ===${NC}"
 PERSIST_FILE="persist_$(date +%s).txt"
-./bin_client CREATE $PERSIST_FILE raju
+run_client_cmd "CREATE $PERSIST_FILE" raju > /dev/null
 sleep 1
-echo -e "1 Persistent data test.\nETIRW" | ./bin_client WRITE $PERSIST_FILE raju 0
+echo -e "WRITE $PERSIST_FILE\n1 Persistent data test.\nETIRW\nEXIT" | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju > /dev/null 2>&1
 sleep 1
 
 # Check if file exists on disk
@@ -250,11 +258,11 @@ fi
 # [5] Access Control Enforcement
 echo -e "\n${YELLOW}=== Test 13: Access Control Enforcement (5 marks) ===${NC}"
 AC_FILE="actest_$(date +%s).txt"
-./bin_client CREATE $AC_FILE raju
+run_client_cmd "CREATE $AC_FILE" raju > /dev/null
 sleep 1
 
 # Try to read without access (using different user)
-output=$(./bin_client READ $AC_FILE babu 2>&1 || true)
+output=$(run_client_cmd "READ $AC_FILE" babu 2>&1 || true)
 if echo "$output" | grep -qi "denied\|unauthorized\|no access\|permission"; then
     print_test "Access Control - Unauthorized read blocked" "PASS"
 else
@@ -278,7 +286,7 @@ fi
 echo -e "\n${YELLOW}=== Test 15: Error Handling (5 marks) ===${NC}"
 
 # Test 1: File not found
-output=$(./bin_client READ nonexistent_file_12345.txt raju 2>&1 || true)
+output=$(run_client_cmd "READ nonexistent_file_12345.txt" raju 2>&1 || true)
 if echo "$output" | grep -qi "error\|not found\|does not exist"; then
     print_test "Error Handling - File not found error" "PASS"
 else
@@ -286,7 +294,7 @@ else
 fi
 
 # Test 2: Invalid sentence index
-output=$(echo -e "99999 test\nETIRW" | ./bin_client WRITE $TEST_FILE raju 999 2>&1 || true)
+output=$(echo -e "WRITE $TEST_FILE\n99999 test\nETIRW\nEXIT" | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju 2>&1 || true)
 if echo "$output" | grep -qi "error\|invalid\|out of range"; then
     print_test "Error Handling - Invalid index error" "PASS"
 else
@@ -297,7 +305,7 @@ fi
 echo -e "\n${YELLOW}=== Test 16: Efficient Search (15 marks) ===${NC}"
 # This is hard to test directly, but we can check if VIEW is fast
 start_time=$(date +%s%N)
-./bin_client VIEW raju > /dev/null 2>&1
+run_client_cmd "VIEW" raju > /dev/null 2>&1
 end_time=$(date +%s%N)
 elapsed=$((($end_time - $start_time) / 1000000))  # Convert to milliseconds
 
@@ -316,9 +324,9 @@ echo "=========================================="
 echo -e "\n${YELLOW}=== Test 17: Replication & Failover ===${NC}"
 
 FAILOVER_FILE="failover_$(date +%s).txt"
-./bin_client CREATE $FAILOVER_FILE raju
+run_client_cmd "CREATE $FAILOVER_FILE" raju > /dev/null
 sleep 1
-echo -e "1 Test failover content.\nETIRW" | ./bin_client WRITE $FAILOVER_FILE raju 0
+echo -e "WRITE $FAILOVER_FILE\n1 Test failover content.\nETIRW\nEXIT" | ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username raju > /dev/null 2>&1
 sleep 3  # Wait for replication
 
 # Check if file is replicated
@@ -330,11 +338,11 @@ fi
 
 # Kill primary and test failover
 echo "Testing failover by killing primary..."
-pkill -9 -f "bin_ss storage_ss1 " 2>/dev/null || true
+pkill -9 -f "bin_ss.*storage_ss1 " 2>/dev/null || true
 sleep 20  # Wait for failure detection and failover
 
 # Try to read file from backup
-output=$(./bin_client READ $FAILOVER_FILE raju 2>&1)
+output=$(run_client_cmd "READ $FAILOVER_FILE" raju 2>&1)
 if echo "$output" | grep -qi "Test failover content\|failover"; then
     print_test "Failover - Read from backup after primary failure" "PASS"
 else
