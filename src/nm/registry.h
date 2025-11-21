@@ -15,8 +15,11 @@ typedef struct RegistryEntry {
     struct RegistryEntry *next;
 } RegistryEntry;
 
-// Add entry to registry
-void registry_add(const char *role, const char *username, const char *payload);
+// Initialize on-disk persistence for client usernames (optional)
+void registry_init_persistence(const char *path);
+
+// Add entry to registry. Returns 1 if a new entry was inserted, 0 if updated.
+int registry_add(const char *role, const char *username, const char *payload);
 
 // Get first SS entry (for round-robin selection)
 // Returns username of first SS, or NULL if none

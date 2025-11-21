@@ -11,9 +11,27 @@ typedef struct {
 
 static RuntimeManager g_manager = {NULL, PTHREAD_MUTEX_INITIALIZER};
 
-static FileRuntimeState *find_or_create_state(const char *filename) {
+static FileRuntimeState *find_state(const char *filename) {
     if (!filename) return NULL;
     pthread_mutex_lock(&g_manager.mu);
+    FileRuntimeState *cur = g_manager.head;
+    while (cur) {
+        if (strcmp(cur->filename, filename) == 0) {
+            pthread_mutex_unlock(&g_manager.mu);
+            return cur;
+        }
+        cur = cur->next;
+    }
+    pthread_mutex_unlock(&g_manager.mu);
+    return NULL;
+}
+
+static FileRuntimeState *find_or_create_state(const char *filename) {
+    FileRuntimeState *existing = find_state(filename);
+    if (existing) return existing;
+    if (!filename) return NULL;
+    pthread_mutex_lock(&g_manager.mu);
+    // ensure not added by race
     FileRuntimeState *cur = g_manager.head;
     while (cur) {
         if (strcmp(cur->filename, filename) == 0) {
@@ -154,6 +172,19 @@ void sentence_lock_cleanup(time_t cutoff_seconds) {
         state = state->next;
     }
     pthread_mutex_unlock(&g_manager.mu);
+}
+
+int runtime_state_has_active_locks(const char *filename) {
+    if (!filename) return 0;
+    FileRuntimeState *state = find_state(filename);
+    if (!state) return 0;
+    int has_lock = 0;
+    pthread_mutex_lock(&state->lock_mu);
+    if (state->lock_count > 0) {
+        has_lock = 1;
+    }
+    pthread_mutex_unlock(&state->lock_mu);
+    return has_lock;
 }
 
 

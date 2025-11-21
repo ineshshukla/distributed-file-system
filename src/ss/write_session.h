@@ -31,6 +31,8 @@ int write_session_apply_edit(WriteSession *session,
                              const char *content,
                              char *error_buf, size_t error_buf_len);
 
+char *write_session_get_current_text(const WriteSession *session);
+
 int write_session_commit(WriteSession *session,
                          char *error_buf, size_t error_buf_len);
 

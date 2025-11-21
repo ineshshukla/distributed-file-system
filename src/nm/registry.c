@@ -23,9 +23,27 @@ static int compare_ss_candidates(const void *a, const void *b) {
 static RegistryEntry *g_registry_head = NULL;
 static pthread_mutex_t g_registry_mu = PTHREAD_MUTEX_INITIALIZER;
 
+// Persistence for client usernames
+#define REGISTRY_PATH_MAX 512
+static char g_registry_path[REGISTRY_PATH_MAX];
+static int g_registry_persistence_enabled = 0;
+static int g_registry_loading = 0;
+
+static void registry_append_client(const char *username) {
+    if (!g_registry_persistence_enabled || !username || username[0] == '\0') {
+        return;
+    }
+    FILE *fp = fopen(g_registry_path, "a");
+    if (!fp) {
+        return;
+    }
+    fprintf(fp, "%s\n", username);
+    fclose(fp);
+}
+
 // Add entry to registry
-void registry_add(const char *role, const char *username, const char *payload) {
-    if (!role || !username) return;
+int registry_add(const char *role, const char *username, const char *payload) {
+    if (!role || !username) return 0;
     pthread_mutex_lock(&g_registry_mu);
     RegistryEntry *entry = g_registry_head;
     while (entry) {
@@ -33,7 +51,7 @@ void registry_add(const char *role, const char *username, const char *payload) {
             strcmp(entry->username, username) == 0) {
             snprintf(entry->payload, sizeof(entry->payload), "%s", payload ? payload : "");
             pthread_mutex_unlock(&g_registry_mu);
-            return;
+            return 0;
         }
         entry = entry->next;
     }
@@ -45,6 +63,34 @@ void registry_add(const char *role, const char *username, const char *payload) {
     e->next = g_registry_head;
     g_registry_head = e;
     pthread_mutex_unlock(&g_registry_mu);
+
+    if (!g_registry_loading &&
+        g_registry_persistence_enabled &&
+        strcmp(role, "CLIENT") == 0) {
+        registry_append_client(username);
+    }
+    return 1;
+}
+
+void registry_init_persistence(const char *path) {
+    if (!path || path[0] == '\0') return;
+    snprintf(g_registry_path, sizeof(g_registry_path), "%s", path);
+    FILE *fp = fopen(g_registry_path, "a+");
+    if (!fp) {
+        return;
+    }
+    g_registry_persistence_enabled = 1;
+    rewind(fp);
+    g_registry_loading = 1;
+    char line[128];
+    while (fgets(line, sizeof(line), fp)) {
+        char *newline = strpbrk(line, "\r\n");
+        if (newline) *newline = '\0';
+        if (line[0] == '\0') continue;
+        registry_add("CLIENT", line, "");
+    }
+    g_registry_loading = 0;
+    fclose(fp);
 }
 
 // Get first SS entry

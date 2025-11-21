@@ -978,7 +978,7 @@ int handle_read(int client_fd, const char *username, const char *filename) {
         Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
         return send_error_response(client_fd, "", username, &err);
     }
-    Error access_err = check_file_access(filename, username, 0, &acl);
+    Error access_err = check_file_access(filename, username, 1, &acl);
     if (!error_is_ok(&access_err)) {
         return send_error_response(client_fd, "", username, &access_err);
     }

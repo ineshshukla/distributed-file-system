@@ -265,6 +265,17 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
             const char *filename = cmd_msg.payload;
             
             log_info("ss_cmd_delete", "file=%s", filename);
+
+            if (runtime_state_has_active_locks(filename)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                   "CONFLICT", "File is locked for writing",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                log_error("ss_delete_locked", "file=%s", filename);
+                return;
+            }
             
             // Delete file
             if (file_delete(ctx->storage_dir, filename) == 0) {
@@ -798,7 +809,15 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
                     (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
                     (void)snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
                     (void)snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+                char *updated_sentence = write_session_get_current_text(&session);
+                if (updated_sentence) {
+                    char display[sizeof(ack.payload)];
+                    (void)snprintf(display, sizeof(display), "Sentence: %s", updated_sentence);
+                    encode_newlines(display, ack.payload, sizeof(ack.payload));
+                    free(updated_sentence);
+                } else {
                     (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "edit applied");
+                }
                     char ack_buf[MAX_LINE];
                     proto_format_line(&ack, ack_buf, sizeof(ack_buf));
                     send_all(client_fd, ack_buf, strlen(ack_buf));

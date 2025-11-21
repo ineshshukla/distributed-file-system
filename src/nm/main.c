@@ -177,7 +177,7 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
             }
         }
         
-        registry_add("SS", msg->username, msg->payload);
+        (void)registry_add("SS", msg->username, msg->payload);
         registry_set_ss_file_count(msg->username, file_count);
         
         // Check if this SS was previously failed (recovery scenario)
@@ -261,7 +261,7 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
     }
     if (strcmp(msg->type, "CLIENT_REGISTER") == 0) {
         // printf("DEBUG: Received message type=CLIENT_REGISTER from %s\n", ip);
-        registry_add("CLIENT", msg->username, msg->payload);
+        (void)registry_add("CLIENT", msg->username, msg->payload);
         log_info("nm_client_register", "ip=%s user=%s", ip, msg->username);
         Message ack = {0};
         (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
@@ -721,6 +721,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--port") && i+1 < argc) port = atoi(argv[++i]);
     }
     
+    registry_init_persistence("registry_clients.txt");
+
     // Step 3: Initialize file index and LRU cache
     index_init();
     log_info("nm_index_init", "File index initialized");
