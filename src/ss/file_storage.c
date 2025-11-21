@@ -228,6 +228,35 @@ int file_read_all(const char *storage_dir, const char *filename,
     return 0;
 }
 
+// Write entire content to a file
+// Overwrites if file exists, creates if doesn't exist
+int file_write_all(const char *storage_dir, const char *filename,
+                   const char *content, size_t content_len) {
+    if (!storage_dir || !filename || !content) return -1;
+    
+    // Ensure files directory exists
+    char files_dir[512];
+    snprintf(files_dir, sizeof(files_dir), "%s/files", storage_dir);
+    mkdir(files_dir, 0755);
+    
+    char file_path[512];
+    snprintf(file_path, sizeof(file_path), "%s/files/%s", storage_dir, filename);
+    
+    FILE *fp = fopen(file_path, "w");
+    if (!fp) {
+        return -1;
+    }
+    
+    size_t written = fwrite(content, 1, content_len, fp);
+    fclose(fp);
+    
+    if (written != content_len) {
+        return -1;
+    }
+    
+    return 0;
+}
+
 // Delete file and metadata
 int file_delete(const char *storage_dir, const char *filename) {
     if (!storage_dir || !filename) return -1;

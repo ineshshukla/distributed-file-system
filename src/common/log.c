@@ -42,6 +42,10 @@ void log_info(const char *event, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vlogf("INFO", event, fmt, ap); va_end(ap);
 }
 
+void log_warning(const char *event, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt); vlogf("WARNING", event, fmt, ap); va_end(ap);
+}
+
 void log_error(const char *event, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vlogf("ERROR", event, fmt, ap); va_end(ap);
 }

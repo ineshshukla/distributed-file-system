@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "*.embeddedhtml": "html",
+        "registry.h": "c",
+        "replication_worker.h": "c"
+    }
+}

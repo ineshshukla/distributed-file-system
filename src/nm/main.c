@@ -17,6 +17,9 @@
 #include "commands.h"
 #include "registry.h"
 #include "access_requests.h"
+#include "heartbeat_monitor.h"
+#include "replication.h"
+#include "replication_worker.h"
 
 // Argument passed to each connection handler thread.
 typedef struct ClientConnArg {
@@ -25,6 +28,58 @@ typedef struct ClientConnArg {
 } ClientConnArg;
 
 static volatile int g_running = 1;
+
+// Failover callback: called when SS fails
+static void on_ss_failure(const char *ss_username) {
+    log_error("failover_start", "SS %s failed, initiating failover", ss_username);
+    
+    // Trigger failover in replication system
+    replication_failover(ss_username);
+    
+    // Get the replica for this failed SS
+    const char *replica_ss = replication_get_replica(ss_username);
+    if (!replica_ss) {
+        log_warning("failover_no_replica", "No replica found for %s, cannot failover", ss_username);
+        return;
+    }
+    
+    log_info("failover_replica_found", "Found replica %s for failed %s", replica_ss, ss_username);
+    
+    // Get replica SS connection info
+    char replica_host[64];
+    int replica_port;
+    if (registry_get_ss_info(replica_ss, replica_host, sizeof(replica_host), &replica_port) != 0) {
+        log_error("failover_replica_info", "Failed to get info for replica %s", replica_ss);
+        return;
+    }
+    
+    log_info("failover_replica_info", "Replica %s at %s:%d", replica_ss, replica_host, replica_port);
+    
+    // Update file index: switch all files from failed SS to replica
+    FileEntry *files[1024];
+    int file_count = index_get_all_files(files, 1024);
+    int updated = 0;
+    
+    for (int i = 0; i < file_count; i++) {
+        FileEntry *entry = files[i];
+        if (strcmp(entry->ss_username, ss_username) == 0) {
+            // This file was on the failed primary, switch to replica
+            log_info("failover_update_file", "Switching file %s from %s to %s", 
+                     entry->filename, ss_username, replica_ss);
+            
+            // Update primary SS info to point to replica
+            strncpy(entry->ss_host, replica_host, sizeof(entry->ss_host) - 1);
+            entry->ss_host[sizeof(entry->ss_host) - 1] = '\0';
+            entry->ss_client_port = replica_port;
+            strncpy(entry->ss_username, replica_ss, sizeof(entry->ss_username) - 1);
+            entry->ss_username[sizeof(entry->ss_username) - 1] = '\0';
+            updated++;
+        }
+    }
+    
+    log_info("failover_complete", "Failover complete for %s: updated %d files to use replica %s", 
+             ss_username, updated, replica_ss);
+}
 
 // Handle a single parsed message from a peer.
 static void handle_message(int fd, const struct sockaddr_in *peer, const Message *msg) {
@@ -124,6 +179,74 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         
         registry_add("SS", msg->username, msg->payload);
         registry_set_ss_file_count(msg->username, file_count);
+        
+        // Check if this SS was previously failed (recovery scenario)
+        SSStatus prev_status = heartbeat_monitor_get_status(msg->username);
+        int is_recovery = (prev_status == SS_STATUS_FAILED);
+        
+        // Register SS for heartbeat monitoring
+        heartbeat_monitor_register_ss(msg->username);
+        
+        // Assign replica for replication (ss1 → ss1_backup)
+        // Only try to pair primary servers (not backup servers themselves)
+        size_t username_len = strlen(msg->username);
+        int is_backup = (username_len >= 7 && strcmp(msg->username + username_len - 7, "_backup") == 0);
+        if (!is_backup) {
+            replication_assign_replica(msg->username);
+        }
+        
+        // If this is a recovery, trigger full sync
+        if (is_recovery) {
+            log_info("nm_ss_recovery", "SS %s recovered from failure, triggering full sync", msg->username);
+            
+            // Get the paired SS (source for sync) BEFORE calling recover (which changes status)
+            const char *pair_ss = NULL;
+            ReplicationPairStatus pair_status = replication_get_pair_status(msg->username);
+            
+            if (pair_status == REPL_STATUS_PRIMARY_FAILED) {
+                // Primary recovered, sync from replica
+                pair_ss = replication_get_replica(msg->username);
+                log_info("nm_recovery_sync_source", "Primary %s will sync from replica %s", 
+                         msg->username, pair_ss ? pair_ss : "none");
+            } else {
+                // Replica recovered, sync from primary
+                const char *primary = replication_get_primary_for_replica(msg->username);
+                if (primary) {
+                    pair_ss = primary;
+                    log_info("nm_recovery_sync_source", "Replica %s will sync from primary %s", 
+                             msg->username, primary);
+                }
+            }
+            
+            // Now update the replication status
+            replication_recover(msg->username);
+            
+            // Queue sync jobs for all files that should be on this SS
+            if (pair_ss) {
+                FileEntry *all_files[1024];
+                int total_files = index_get_all_files(all_files, 1024);
+                int sync_count = 0;
+                
+                // Queue sync for all files that were on the recovered SS
+                for (int i = 0; i < total_files; i++) {
+                    FileEntry *entry = all_files[i];
+                    // Sync files that belong to this recovered SS (they may point to either SS now)
+                    if (strcmp(entry->ss_username, pair_ss) == 0 ||
+                        strcmp(entry->ss_username, msg->username) == 0) {
+                        log_info("nm_recovery_sync_file", "Queueing %s from %s to %s",
+                                 entry->filename, pair_ss, msg->username);
+                        replication_worker_queue(REPL_OP_UPDATE, entry->filename, 
+                                                pair_ss, msg->username);
+                        sync_count++;
+                    }
+                }
+                log_info("nm_recovery_sync_queued", "Queued %d files for recovery sync from %s to %s",
+                         sync_count, pair_ss, msg->username);
+            } else {
+                log_warning("nm_recovery_no_pair", "No pair found for %s, cannot sync", msg->username);
+            }
+        }
+        
         log_info("nm_ss_register", "ip=%s user=%s files=%d indexed", ip, msg->username, file_count);
         
         Message ack = {0};
@@ -151,6 +274,9 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         return;
     }
     if (strcmp(msg->type, "HEARTBEAT") == 0) {
+        // Update heartbeat timestamp for this SS
+        heartbeat_monitor_update(msg->username);
+        
         log_info("nm_heartbeat", "user=%s", msg->username);
         Message ack = {0};
         (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
@@ -158,6 +284,33 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         (void)snprintf(ack.username, sizeof(ack.username), "%s", msg->username);
         (void)snprintf(ack.role, sizeof(ack.role), "%s", "NM");
         (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "pong");
+        char line[MAX_LINE]; proto_format_line(&ack, line, sizeof(line));
+        send_all(fd, line, strlen(line));
+        return;
+    }
+    if (strcmp(msg->type, "WRITE_COMPLETE") == 0) {
+        // SS notifies NM that file was written - queue replication
+        const char *filename = msg->payload;
+        const char *ss_username = msg->username;
+        
+        log_info("nm_write_complete", "file=%s ss=%s", filename, ss_username);
+        
+        // Queue replication to backup
+        const char *replica = replication_get_replica(ss_username);
+        if (replica) {
+            if (replication_worker_queue(REPL_OP_UPDATE, filename, ss_username, replica) == 0) {
+                log_info("nm_write_replication_queued", "file=%s primary=%s replica=%s", 
+                         filename, ss_username, replica);
+            }
+        }
+        
+        // Send ACK
+        Message ack = {0};
+        (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+        (void)snprintf(ack.id, sizeof(ack.id), "%s", msg->id);
+        (void)snprintf(ack.username, sizeof(ack.username), "%s", msg->username);
+        (void)snprintf(ack.role, sizeof(ack.role), "%s", "NM");
+        (void)snprintf(ack.payload, sizeof(ack.payload), "%s", "write_replication_queued");
         char line[MAX_LINE]; proto_format_line(&ack, line, sizeof(line));
         send_all(fd, line, strlen(line));
         return;
@@ -576,6 +729,27 @@ int main(int argc, char **argv) {
     request_queue_init();
     log_info("nm_request_queue_init", "Access request queue initialized");
     
+    // Initialize and start heartbeat monitoring
+    heartbeat_monitor_init();
+    if (heartbeat_monitor_start() != 0) {
+        log_error("nm_startup", "Failed to start heartbeat monitoring");
+        return 1;
+    }
+    log_info("nm_startup", "Heartbeat monitoring started");
+    
+    // Initialize and start replication system
+    replication_init();
+    replication_worker_init();
+    if (replication_worker_start() != 0) {
+        log_error("nm_startup", "Failed to start replication worker");
+        return 1;
+    }
+    log_info("nm_startup", "Replication system started");
+    
+    // Register failover callback
+    heartbeat_monitor_set_failure_callback(on_ss_failure);
+    log_info("nm_startup", "Failover callback registered");
+    
     signal(SIGINT, on_sigint);
     int server_fd = create_server_socket(host, port);
     if (server_fd < 0) { perror("NM listen"); return 1; }
@@ -589,6 +763,14 @@ int main(int argc, char **argv) {
         c->fd = fd; c->addr = addr;
         pthread_t th; (void)pthread_create(&th, NULL, client_thread, c); pthread_detach(th);
     }
+    
+    // Shutdown: stop replication and heartbeat monitoring
+    replication_worker_stop();
+    log_info("nm_shutdown", "Replication worker stopped");
+    
+    heartbeat_monitor_stop();
+    log_info("nm_shutdown", "Heartbeat monitoring stopped");
+    
     close(server_fd);
     return 0;
 }

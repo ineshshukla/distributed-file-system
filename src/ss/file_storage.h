@@ -103,6 +103,11 @@ int file_read(const char *storage_dir, const char *filename,
 int file_read_all(const char *storage_dir, const char *filename,
                   char **out_buf, size_t *out_len);
 
+// Write entire content to a file (for replication)
+// Overwrites if file exists, creates if doesn't exist
+int file_write_all(const char *storage_dir, const char *filename,
+                   const char *content, size_t content_len);
+
 // Delete a file and its metadata
 // storage_dir: Base storage directory
 // filename: Name of the file to delete

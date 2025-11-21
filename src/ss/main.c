@@ -811,6 +811,22 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
                         send_all(client_fd, error_buf, strlen(error_buf));
                         write_session_abort(&session);
                     } else {
+                        // Notify NM about write completion for replication
+                        int nm_fd = connect_to_host(ctx->nm_host, ctx->nm_port);
+                        if (nm_fd >= 0) {
+                            Message notify = {0};
+                            (void)snprintf(notify.type, sizeof(notify.type), "%s", "WRITE_COMPLETE");
+                            (void)snprintf(notify.id, sizeof(notify.id), "%s", "1");
+                            (void)snprintf(notify.username, sizeof(notify.username), "%s", ctx->username);
+                            (void)snprintf(notify.role, sizeof(notify.role), "%s", "SS");
+                            (void)snprintf(notify.payload, sizeof(notify.payload), "%s", filename);
+                            char notify_line[MAX_LINE];
+                            proto_format_line(&notify, notify_line, sizeof(notify_line));
+                            send_all(nm_fd, notify_line, strlen(notify_line));
+                            close(nm_fd);
+                            log_info("ss_write_notify", "notified NM: file=%s", filename);
+                        }
+                        
                         Message ack = {0};
                         (void)snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
                         (void)snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
@@ -1644,6 +1660,258 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
                 proto_format_line(&ack, ack_line, sizeof(ack_line));
                 send_all(client_fd, ack_line, strlen(ack_line));
             }
+            close(client_fd);
+            return;
+        }
+        // Handle GET_FILE_CONTENT command (for NM to fetch file for replication)
+        else if (strcmp(cmd_msg.type, "GET_FILE_CONTENT") == 0) {
+            const char *filename = cmd_msg.payload;
+            
+            log_info("ss_cmd_get_file_content", "file=%s requestor=%s", filename, cmd_msg.username);
+            
+            // Read entire file content
+            // Special handling for metadata files - construct path directly
+            char *content = NULL;
+            size_t content_size = 0;
+            
+            if (strncmp(filename, "metadata/", 9) == 0) {
+                // Metadata file - read directly from metadata directory
+                char meta_path[2048];
+                snprintf(meta_path, sizeof(meta_path), "%s/%s", ctx->storage_dir, filename);
+                
+                FILE *fp = fopen(meta_path, "r");
+                if (!fp) {
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "NOT_FOUND", "Metadata file not found",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                    close(client_fd);
+                    return;
+                }
+                
+                fseek(fp, 0, SEEK_END);
+                long size = ftell(fp);
+                fseek(fp, 0, SEEK_SET);
+                content = (char*)malloc(size + 1);
+                if (!content) {
+                    fclose(fp);
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "INTERNAL", "Memory allocation failed",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                    close(client_fd);
+                    return;
+                }
+                content_size = fread(content, 1, size, fp);
+                content[content_size] = '\0';
+                fclose(fp);
+            } else {
+                // Regular file - use file_read_all
+                if (file_read_all(ctx->storage_dir, filename, &content, &content_size) != 0) {
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "NOT_FOUND", "File not found or read error",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                    close(client_fd);
+                    return;
+                }
+            }
+            
+            // For metadata files, send ACK with size first
+            if (strncmp(filename, "metadata/", 9) == 0) {
+                Message ack_msg = {0};
+                snprintf(ack_msg.type, sizeof(ack_msg.type), "ACK");
+                snprintf(ack_msg.id, sizeof(ack_msg.id), "%s", cmd_msg.id);
+                snprintf(ack_msg.username, sizeof(ack_msg.username), "%s", cmd_msg.username);
+                snprintf(ack_msg.role, sizeof(ack_msg.role), "SS");
+                snprintf(ack_msg.payload, sizeof(ack_msg.payload), "%zu", content_size);
+                
+                char ack_buf[MAX_LINE];
+                proto_format_line(&ack_msg, ack_buf, sizeof(ack_buf));
+                send_all(client_fd, ack_buf, strlen(ack_buf));
+            }
+            
+            // Send content in chunks using DATA messages
+            size_t offset = 0;
+            while (offset < content_size) {
+                Message data_msg = {0};
+                snprintf(data_msg.type, sizeof(data_msg.type), "DATA");
+                snprintf(data_msg.id, sizeof(data_msg.id), "%s", cmd_msg.id);
+                snprintf(data_msg.username, sizeof(data_msg.username), "%s", cmd_msg.username);
+                snprintf(data_msg.role, sizeof(data_msg.role), "SS");
+                
+                // Copy chunk, replacing \n with \x01
+                size_t payload_pos = 0;
+                size_t payload_max = sizeof(data_msg.payload) - 1;
+                
+                while (offset < content_size && payload_pos < payload_max) {
+                    if (content[offset] == '\n') {
+                        data_msg.payload[payload_pos++] = '\x01';
+                    } else {
+                        data_msg.payload[payload_pos++] = content[offset];
+                    }
+                    offset++;
+                }
+                data_msg.payload[payload_pos] = '\0';
+                
+                char data_buf[MAX_LINE];
+                if (proto_format_line(&data_msg, data_buf, sizeof(data_buf)) == 0) {
+                    send_all(client_fd, data_buf, strlen(data_buf));
+                }
+            }
+            
+            free(content);
+            
+            // Send STOP packet
+            Message stop_msg = {0};
+            snprintf(stop_msg.type, sizeof(stop_msg.type), "STOP");
+            snprintf(stop_msg.id, sizeof(stop_msg.id), "%s", cmd_msg.id);
+            snprintf(stop_msg.username, sizeof(stop_msg.username), "%s", cmd_msg.username);
+            snprintf(stop_msg.role, sizeof(stop_msg.role), "SS");
+            stop_msg.payload[0] = '\0';
+            
+            char stop_buf[MAX_LINE];
+            if (proto_format_line(&stop_msg, stop_buf, sizeof(stop_buf)) == 0) {
+                send_all(client_fd, stop_buf, strlen(stop_buf));
+            }
+            
+            log_info("ss_get_file_content_success", "file=%s size=%zu", filename, content_size);
+            close(client_fd);
+            return;
+        }
+        // Handle PUT_FILE_CONTENT command (for NM to write file for replication)
+        else if (strcmp(cmd_msg.type, "PUT_FILE_CONTENT") == 0) {
+            // Payload format: "filename" or "metadata/filename.meta|size"
+            // Content follows in DATA messages, terminated by STOP
+            // Extract just the filename (before any | separator)
+            char filename_buf[MAX_LINE];
+            const char *pipe_pos = strchr(cmd_msg.payload, '|');
+            if (pipe_pos) {
+                size_t len = pipe_pos - cmd_msg.payload;
+                if (len >= sizeof(filename_buf)) len = sizeof(filename_buf) - 1;
+                strncpy(filename_buf, cmd_msg.payload, len);
+                filename_buf[len] = '\0';
+            } else {
+                strncpy(filename_buf, cmd_msg.payload, sizeof(filename_buf) - 1);
+                filename_buf[sizeof(filename_buf) - 1] = '\0';
+            }
+            const char *filename = filename_buf;
+            
+            log_info("ss_cmd_put_file_content", "file=%s sender=%s", filename, cmd_msg.username);
+            
+            // Collect content from DATA messages
+            char *content = NULL;
+            size_t content_size = 0;
+            size_t content_capacity = 4096;
+            content = (char*)malloc(content_capacity);
+            if (!content) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "INTERNAL", "Memory allocation failed",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Read DATA messages until STOP
+            char line[MAX_LINE];
+            while (1) {
+                int n = recv_line(client_fd, line, sizeof(line));
+                if (n <= 0) break;
+                
+                Message data_msg;
+                if (proto_parse_line(line, &data_msg) != 0) continue;
+                
+                if (strcmp(data_msg.type, "STOP") == 0) {
+                    break;
+                }
+                
+                if (strcmp(data_msg.type, "DATA") == 0) {
+                    // Decode payload (replace \x01 back to \n)
+                    size_t payload_len = strlen(data_msg.payload);
+                    
+                    // Ensure capacity
+                    while (content_size + payload_len + 1 > content_capacity) {
+                        content_capacity *= 2;
+                        char *new_content = (char*)realloc(content, content_capacity);
+                        if (!new_content) {
+                            free(content);
+                            char error_buf[MAX_LINE];
+                            proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                              "INTERNAL", "Memory allocation failed",
+                                              error_buf, sizeof(error_buf));
+                            send_all(client_fd, error_buf, strlen(error_buf));
+                            close(client_fd);
+                            return;
+                        }
+                        content = new_content;
+                    }
+                    
+                    // Copy and decode
+                    for (size_t i = 0; i < payload_len; i++) {
+                        if (data_msg.payload[i] == '\x01') {
+                            content[content_size++] = '\n';
+                        } else {
+                            content[content_size++] = data_msg.payload[i];
+                        }
+                    }
+                }
+            }
+            
+            content[content_size] = '\0';
+            
+            // Write file
+            if (strncmp(filename, "metadata/", 9) == 0) {
+                // Metadata file - write directly to metadata directory
+                char meta_path[4096];
+                snprintf(meta_path, sizeof(meta_path), "%s/%s", ctx->storage_dir, filename);
+                
+                FILE *fp = fopen(meta_path, "w");
+                if (!fp) {
+                    free(content);
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "INTERNAL", "Failed to create metadata file",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                    close(client_fd);
+                    return;
+                }
+                fwrite(content, 1, content_size, fp);
+                fclose(fp);
+            } else {
+                // Regular file - use file_write_all
+                if (file_write_all(ctx->storage_dir, filename, content, content_size) != 0) {
+                    free(content);
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "INTERNAL", "Failed to write file",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                    close(client_fd);
+                    return;
+                }
+            }
+            
+            free(content);
+            
+            // Send ACK
+            Message ack = {0};
+            snprintf(ack.type, sizeof(ack.type), "ACK");
+            snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+            snprintf(ack.role, sizeof(ack.role), "SS");
+            snprintf(ack.payload, sizeof(ack.payload), "File written successfully");
+            
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            
+            log_info("ss_put_file_content_success", "file=%s size=%zu", filename, content_size);
             close(client_fd);
             return;
         }

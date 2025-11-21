@@ -176,10 +176,15 @@ int registry_get_ss_candidates(char usernames[][64], int max_entries) {
     int idx = 0;
     while (entry) {
         if (strcmp(entry->role, "SS") == 0 && idx < ss_count) {
-            strncpy(candidates[idx].username, entry->username, sizeof(candidates[idx].username) - 1);
-            candidates[idx].username[sizeof(candidates[idx].username) - 1] = '\0';
-            candidates[idx].file_count = entry->file_count;
-            idx++;
+            // Skip backup servers (ending in "_backup") - they shouldn't be candidates for new files
+            size_t username_len = strlen(entry->username);
+            int is_backup = (username_len >= 7 && strcmp(entry->username + username_len - 7, "_backup") == 0);
+            if (!is_backup) {
+                strncpy(candidates[idx].username, entry->username, sizeof(candidates[idx].username) - 1);
+                candidates[idx].username[sizeof(candidates[idx].username) - 1] = '\0';
+                candidates[idx].file_count = entry->file_count;
+                idx++;
+            }
         }
         entry = entry->next;
     }

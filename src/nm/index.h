@@ -23,6 +23,12 @@ typedef struct FileEntry {
     char ss_host[64];                 // IP address of Storage Server hosting this file
     int ss_client_port;               // Port on SS for client connections
     char ss_username[64];             // Username of SS (for identification)
+    
+    // Replication fields (for fault tolerance)
+    char replica_ss_host[64];         // Backup SS IP address
+    int replica_ss_client_port;       // Backup SS client port
+    char replica_ss_username[64];     // Backup SS username
+    
     time_t created;                   // Creation timestamp
     time_t last_modified;             // Last modification timestamp
     time_t last_accessed;             // Last access timestamp

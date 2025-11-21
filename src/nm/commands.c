@@ -13,6 +13,9 @@
 #include "../common/log.h"
 #include "registry.h"
 #include "access_requests.h"
+#include "replication.h"
+#include "replication_worker.h"
+#include "heartbeat_monitor.h"
 
 #define MAX_SS_CANDIDATES 64
 
@@ -20,6 +23,30 @@ static int get_ss_connection_for_file(const FileEntry *entry);
 static int fetch_file_content_from_ss(const FileEntry *entry, char **content_out);
 static int execute_script_text(const char *script_text, char **output_out, char *error_buf, size_t error_len);
 static int send_streaming_response(int client_fd, const char *id, const char *username, const char *text);
+
+// Helper: Get active SS host/port for file (primary if alive, else replica)
+static void get_active_ss_for_file(const FileEntry *entry, 
+                                   const char **host, int *port, const char **ss_name) {
+    // Check if primary is alive
+    if (heartbeat_monitor_is_alive(entry->ss_username)) {
+        *host = entry->ss_host;
+        *port = entry->ss_client_port;
+        *ss_name = entry->ss_username;
+    } else if (entry->replica_ss_username[0] != '\0' && 
+               heartbeat_monitor_is_alive(entry->replica_ss_username)) {
+        // Primary failed, use replica
+        *host = entry->replica_ss_host;
+        *port = entry->replica_ss_client_port;
+        *ss_name = entry->replica_ss_username;
+        log_info("nm_failover_read", "Primary %s failed, using replica %s", 
+                 entry->ss_username, entry->replica_ss_username);
+    } else {
+        // Both failed or no replica - use primary anyway (will fail)
+        *host = entry->ss_host;
+        *port = entry->ss_client_port;
+        *ss_name = entry->ss_username;
+    }
+}
 
 // Helper: Fetch ACL from storage server
 static int fetch_acl_from_ss(const FileEntry *entry, ACL *acl_out) {
@@ -362,8 +389,14 @@ int send_data_response(int client_fd, const char *id, const char *username,
 static int get_ss_connection_for_file(const FileEntry *entry) {
     if (!entry) return -1;
     
-    // Connect to SS using host and port from entry
-    int fd = connect_to_host(entry->ss_host, entry->ss_client_port);
+    // Get active SS (failover to replica if primary is down)
+    const char *active_host;
+    int active_port;
+    const char *active_ss_name;
+    get_active_ss_for_file(entry, &active_host, &active_port, &active_ss_name);
+    
+    // Connect to active SS
+    int fd = connect_to_host(active_host, active_port);
     if (fd < 0) {
         return -1;
     }
@@ -723,6 +756,20 @@ int handle_create(int client_fd, const char *username, const char *filename) {
         
         log_info("nm_file_created", "file=%s owner=%s", filename, entry->owner);
         registry_adjust_ss_file_count(selected_ss, 1);
+        
+        // Queue async replication to backup SS
+        const char *replica = replication_get_replica(selected_ss);
+        log_info("nm_replication_check", "file=%s primary=%s replica=%s", 
+                 filename, selected_ss, replica ? replica : "NULL");
+        if (replica) {
+            int queue_result = replication_worker_queue(REPL_OP_CREATE, filename, selected_ss, replica);
+            log_info("nm_replication_queue_result", "file=%s result=%d", filename, queue_result);
+            if (queue_result == 0) {
+                log_info("nm_replication_queued", "file=%s op=CREATE primary=%s replica=%s", 
+                         filename, selected_ss, replica);
+            }
+        }
+        
         return send_success_response(client_fd, "", username, "File Created Successfully!");
     } else {
         Error err = error_simple(ERR_INTERNAL, "Failed to index file");
@@ -805,6 +852,15 @@ int handle_delete(int client_fd, const char *username, const char *filename) {
     if (index_remove_file(filename) == 0) {
         log_info("nm_file_deleted", "file=%s owner=%s", filename, username);
         registry_adjust_ss_file_count(entry->ss_username, -1);
+        
+        // Queue async replication deletion to backup SS
+        const char *replica = replication_get_replica(entry->ss_username);
+        if (replica) {
+            if (replication_worker_queue(REPL_OP_DELETE, filename, entry->ss_username, replica) == 0) {
+                log_info("nm_replication_queued", "file=%s op=DELETE primary=%s replica=%s", 
+                         filename, entry->ss_username, replica);
+            }
+        }
         
         // Remove any pending access requests for this file
         request_queue_remove_by_filename(entry->filename, entry->folder_path);
@@ -910,6 +966,12 @@ int handle_read(int client_fd, const char *username, const char *filename) {
     
     log_info("nm_read_found", "file=%s folder=%s basename=%s", filename, entry->folder_path, entry->filename);
 
+    // Get active SS (primary or replica if primary failed)
+    const char *active_host;
+    int active_port;
+    const char *active_ss_name;
+    get_active_ss_for_file(entry, &active_host, &active_port, &active_ss_name);
+
     // Load ACL from SS and check read access
     ACL acl = {0};
     if (fetch_acl_from_ss(entry, &acl) != 0) {
@@ -923,7 +985,7 @@ int handle_read(int client_fd, const char *username, const char *filename) {
     
     // Format SS connection info: host=IP,port=PORT
     char ss_info[256];
-    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", active_host, active_port);
     
     // Send SS_INFO message to client
     Message resp = {0};
@@ -940,7 +1002,7 @@ int handle_read(int client_fd, const char *username, const char *filename) {
         return send_error_response(client_fd, "", username, &err);
     }
     
-    log_info("nm_read_ss_info", "file=%s user=%s ss=%s:%d", filename, username, entry->ss_host, entry->ss_client_port);
+    log_info("nm_read_ss_info", "file=%s user=%s ss=%s:%d", filename, username, active_host, active_port);
     return send_all(client_fd, resp_buf, strlen(resp_buf));
 }
 
@@ -958,6 +1020,12 @@ int handle_stream(int client_fd, const char *username, const char *filename) {
         return send_error_response(client_fd, "", username, &err);
     }
 
+    // Get active SS (primary or replica if primary failed)
+    const char *active_host;
+    int active_port;
+    const char *active_ss_name;
+    get_active_ss_for_file(entry, &active_host, &active_port, &active_ss_name);
+
     // Load ACL and check read access
     ACL acl = {0};
     if (fetch_acl_from_ss(entry, &acl) != 0) {
@@ -971,7 +1039,7 @@ int handle_stream(int client_fd, const char *username, const char *filename) {
     
     // Format SS connection info: host=IP,port=PORT
     char ss_info[256];
-    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", active_host, active_port);
     
     // Send SS_INFO message to client
     Message resp = {0};
@@ -988,7 +1056,7 @@ int handle_stream(int client_fd, const char *username, const char *filename) {
         return send_error_response(client_fd, "", username, &err);
     }
     
-    log_info("nm_stream_ss_info", "file=%s user=%s ss=%s:%d", filename, username, entry->ss_host, entry->ss_client_port);
+    log_info("nm_stream_ss_info", "file=%s user=%s ss=%s:%d", filename, username, active_host, active_port);
     return send_all(client_fd, resp_buf, strlen(resp_buf));
 }
 
@@ -1092,6 +1160,12 @@ int handle_write(int client_fd, const char *username, const char *filename, int 
         return send_error_response(client_fd, "", username, &err);
     }
 
+    // Get active SS (primary or replica if primary failed)
+    const char *active_host;
+    int active_port;
+    const char *active_ss_name;
+    get_active_ss_for_file(entry, &active_host, &active_port, &active_ss_name);
+
     ACL acl = {0};
     if (fetch_acl_from_ss(entry, &acl) != 0) {
         Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
@@ -1103,7 +1177,7 @@ int handle_write(int client_fd, const char *username, const char *filename, int 
     }
 
     char ss_info[256];
-    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", entry->ss_host, entry->ss_client_port);
+    (void)snprintf(ss_info, sizeof(ss_info), "host=%s,port=%d", active_host, active_port);
 
     Message resp = {0};
     (void)snprintf(resp.type, sizeof(resp.type), "%s", "SS_INFO");
