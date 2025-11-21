@@ -127,6 +127,12 @@ int handle_exec(int client_fd, const char *username, const char *filename, const
 // Handle WRITE command - returns SS info after checking write access
 int handle_write(int client_fd, const char *username, const char *filename, int sentence_index);
 
+// Handle checkpoint commands
+int handle_checkpoint(int client_fd, const char *username, const char *filename, const char *tag);
+int handle_viewcheckpoint(int client_fd, const char *username, const char *filename, const char *tag);
+int handle_revert_checkpoint(int client_fd, const char *username, const char *filename, const char *tag);
+int handle_listcheckpoints(int client_fd, const char *username, const char *filename);
+
 // Handle ADDACCESS command
 // client_fd: File descriptor to send response to
 // username: Username of requesting client (must be file owner)

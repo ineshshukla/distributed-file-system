@@ -212,6 +212,58 @@ int undo_save_state(const char *storage_dir, const char *filename);
 int undo_restore_state(const char *storage_dir, const char *filename);
 int undo_exists(const char *storage_dir, const char *filename);
 
+// ===== Checkpoint Operations =====
+
+// Maximum checkpoints per file
+#define MAX_CHECKPOINTS_PER_FILE 20
+
+// Checkpoint metadata entry
+typedef struct {
+    char tag[64];           // Checkpoint tag (unique per file)
+    char creator[64];       // Username who created checkpoint
+    time_t timestamp;       // When checkpoint was created
+    size_t file_size;       // Size of file at checkpoint
+} CheckpointEntry;
+
+// Create a checkpoint with the given tag
+// storage_dir: Base storage directory
+// filename: Name of the file to checkpoint
+// tag: Unique tag for this checkpoint (alphanumeric, underscore, dash only)
+// creator: Username creating the checkpoint
+// Returns: 0 on success, -1 on error
+//
+// Creates:
+//   storage_dir/checkpoints/filename/tag.checkpoint.data
+//   storage_dir/checkpoints/filename/tag.checkpoint.meta
+//   Updates checkpoint.index file
+int checkpoint_create(const char *storage_dir, const char *filename, 
+                     const char *tag, const char *creator);
+
+// Check if a checkpoint exists
+// Returns: 1 if exists, 0 if not
+int checkpoint_exists(const char *storage_dir, const char *filename, const char *tag);
+
+// Restore file to a checkpoint state
+// This reverts both file content and metadata to the checkpoint
+// Returns: 0 on success, -1 on error
+int checkpoint_restore(const char *storage_dir, const char *filename, const char *tag);
+
+// List all checkpoints for a file
+// tags: Output array of checkpoint entries (caller must free)
+// count: Output number of checkpoints
+// Returns: 0 on success, -1 on error
+int checkpoint_list(const char *storage_dir, const char *filename, 
+                   CheckpointEntry **entries, int *count);
+
+// Get content of a checkpoint (for VIEWCHECKPOINT)
+// content_buf: Buffer to store checkpoint content
+// buf_size: Size of buffer
+// actual_size: Actual content size (can be NULL)
+// Returns: 0 on success, -1 on error
+int checkpoint_get_content(const char *storage_dir, const char *filename, 
+                          const char *tag, char *content_buf, 
+                          size_t buf_size, size_t *actual_size);
+
 // ===== Folder Operations =====
 
 // Create a folder (directory) on the storage server

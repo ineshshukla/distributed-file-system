@@ -2033,3 +2033,269 @@ int handle_disapproveaccessrequest(int client_fd, const char *username, const ch
     return send_success_response(client_fd, "", username, "Access request denied");
 }
 
+// ===== Checkpoint Handlers =====
+
+int handle_checkpoint(int client_fd, const char *username, const char *filename, const char *tag) {
+    if (!username || !filename || !tag || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Lookup file
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Check write access (only write users can create checkpoints)
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 1, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_INTERNAL, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Format request to SS: filename|tag
+    char payload[512];
+    snprintf(payload, sizeof(payload), "%s|%s", filename, tag);
+
+    // Send CHECKPOINT command to SS
+    Message ss_req = {0};
+    snprintf(ss_req.type, sizeof(ss_req.type), "CHECKPOINT");
+    snprintf(ss_req.id, sizeof(ss_req.id), "1");
+    snprintf(ss_req.username, sizeof(ss_req.username), "%s", username);
+    snprintf(ss_req.role, sizeof(ss_req.role), "NM");
+    snprintf(ss_req.payload, sizeof(ss_req.payload), "%s", payload);
+
+    char req_buf[MAX_LINE];
+    proto_format_line(&ss_req, req_buf, sizeof(req_buf));
+    if (send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send request to SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Receive response from SS
+    char ss_resp[MAX_LINE];
+    if (recv_line(ss_fd, ss_resp, sizeof(ss_resp)) <= 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "No response from SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    close(ss_fd);
+
+    // Parse SS response
+    Message ss_msg = {0};
+    if (proto_parse_line(ss_resp, &ss_msg) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Invalid SS response");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Forward response to client
+    log_info("nm_checkpoint", "user=%s file=%s tag=%s result=%s", 
+             username, filename, tag, ss_msg.type);
+    return send_all(client_fd, ss_resp, strlen(ss_resp));
+}
+
+int handle_viewcheckpoint(int client_fd, const char *username, const char *filename, const char *tag) {
+    if (!username || !filename || !tag || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Lookup file
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Check read access
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 0, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_INTERNAL, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Format request to SS
+    char payload[512];
+    snprintf(payload, sizeof(payload), "%s|%s", filename, tag);
+
+    // Send VIEWCHECKPOINT command to SS
+    Message ss_req = {0};
+    snprintf(ss_req.type, sizeof(ss_req.type), "VIEWCHECKPOINT");
+    snprintf(ss_req.id, sizeof(ss_req.id), "1");
+    snprintf(ss_req.username, sizeof(ss_req.username), "%s", username);
+    snprintf(ss_req.role, sizeof(ss_req.role), "NM");
+    snprintf(ss_req.payload, sizeof(ss_req.payload), "%s", payload);
+
+    char req_buf[MAX_LINE];
+    proto_format_line(&ss_req, req_buf, sizeof(req_buf));
+    if (send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send request to SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Receive response from SS
+    char ss_resp[MAX_LINE];
+    if (recv_line(ss_fd, ss_resp, sizeof(ss_resp)) <= 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "No response from SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    close(ss_fd);
+
+    // Forward response to client
+    log_info("nm_viewcheckpoint", "user=%s file=%s tag=%s", username, filename, tag);
+    return send_all(client_fd, ss_resp, strlen(ss_resp));
+}
+
+int handle_revert_checkpoint(int client_fd, const char *username, const char *filename, const char *tag) {
+    if (!username || !filename || !tag || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Lookup file
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Check write access (only write users can revert)
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 1, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_INTERNAL, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Format request to SS
+    char payload[512];
+    snprintf(payload, sizeof(payload), "%s|%s", filename, tag);
+
+    // Send REVERT command to SS
+    Message ss_req = {0};
+    snprintf(ss_req.type, sizeof(ss_req.type), "REVERT");
+    snprintf(ss_req.id, sizeof(ss_req.id), "1");
+    snprintf(ss_req.username, sizeof(ss_req.username), "%s", username);
+    snprintf(ss_req.role, sizeof(ss_req.role), "NM");
+    snprintf(ss_req.payload, sizeof(ss_req.payload), "%s", payload);
+
+    char req_buf[MAX_LINE];
+    proto_format_line(&ss_req, req_buf, sizeof(req_buf));
+    if (send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send request to SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Receive response from SS
+    char ss_resp[MAX_LINE];
+    if (recv_line(ss_fd, ss_resp, sizeof(ss_resp)) <= 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "No response from SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    close(ss_fd);
+
+    // Forward response to client
+    log_info("nm_revert", "user=%s file=%s tag=%s", username, filename, tag);
+    return send_all(client_fd, ss_resp, strlen(ss_resp));
+}
+
+int handle_listcheckpoints(int client_fd, const char *username, const char *filename) {
+    if (!username || !filename || !client_fd) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Lookup file
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Check read access
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    Error access_err = check_file_access(filename, username, 0, &acl);
+    if (!error_is_ok(&access_err)) {
+        return send_error_response(client_fd, "", username, &access_err);
+    }
+
+    // Connect to SS
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        Error err = error_simple(ERR_INTERNAL, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Send LISTCHECKPOINTS command to SS
+    Message ss_req = {0};
+    snprintf(ss_req.type, sizeof(ss_req.type), "LISTCHECKPOINTS");
+    snprintf(ss_req.id, sizeof(ss_req.id), "1");
+    snprintf(ss_req.username, sizeof(ss_req.username), "%s", username);
+    snprintf(ss_req.role, sizeof(ss_req.role), "NM");
+    snprintf(ss_req.payload, sizeof(ss_req.payload), "%s", filename);
+
+    char req_buf[MAX_LINE];
+    proto_format_line(&ss_req, req_buf, sizeof(req_buf));
+    if (send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "Failed to send request to SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+
+    // Receive response from SS
+    char ss_resp[MAX_LINE];
+    if (recv_line(ss_fd, ss_resp, sizeof(ss_resp)) <= 0) {
+        close(ss_fd);
+        Error err = error_simple(ERR_INTERNAL, "No response from SS");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    close(ss_fd);
+
+    // Forward response to client
+    log_info("nm_listcheckpoints", "user=%s file=%s", username, filename);
+    return send_all(client_fd, ss_resp, strlen(ss_resp));
+}
+

@@ -794,3 +794,289 @@ int file_move(const char *storage_dir, const char *filename,
     return 0;
 }
 
+// ===== Checkpoint Operations =====
+
+// Helper: Validate checkpoint tag (alphanumeric, underscore, dash only)
+static int is_valid_checkpoint_tag(const char *tag) {
+    if (!tag || strlen(tag) == 0 || strlen(tag) >= 64) return 0;
+    
+    for (const char *p = tag; *p; p++) {
+        if (!((*p >= 'a' && *p <= 'z') || 
+              (*p >= 'A' && *p <= 'Z') || 
+              (*p >= '0' && *p <= '9') || 
+              *p == '_' || *p == '-')) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// Helper: Build checkpoint directory path
+static void build_checkpoint_dir(const char *storage_dir, const char *filename,
+                                char *checkpoint_dir, size_t dir_size) {
+    const char *norm_filename = normalize_filename(filename);
+    snprintf(checkpoint_dir, dir_size, "%s/checkpoints/%s", storage_dir, norm_filename);
+}
+
+// Helper: Build checkpoint file paths
+static void build_checkpoint_paths(const char *storage_dir, const char *filename, 
+                                   const char *tag, char *data_path, size_t data_size,
+                                   char *meta_path, size_t meta_size) {
+    char checkpoint_dir[600];
+    build_checkpoint_dir(storage_dir, filename, checkpoint_dir, sizeof(checkpoint_dir));
+    (void)snprintf(data_path, data_size, "%s/%s.checkpoint.data", checkpoint_dir, tag);
+    (void)snprintf(meta_path, meta_size, "%s/%s.checkpoint.meta", checkpoint_dir, tag);
+}
+
+// Helper: Build checkpoint index path
+static void build_checkpoint_index_path(const char *storage_dir, const char *filename,
+                                       char *index_path, size_t path_size) {
+    char checkpoint_dir[600];
+    build_checkpoint_dir(storage_dir, filename, checkpoint_dir, sizeof(checkpoint_dir));
+    (void)snprintf(index_path, path_size, "%s/checkpoint.index", checkpoint_dir);
+}
+
+// Helper: Load checkpoint index
+static int load_checkpoint_index(const char *storage_dir, const char *filename,
+                                CheckpointEntry *entries, int *count, int max_count) {
+    char index_path[700];
+    build_checkpoint_index_path(storage_dir, filename, index_path, sizeof(index_path));
+    
+    FILE *fp = fopen(index_path, "r");
+    if (!fp) {
+        *count = 0;
+        return 0;  // No index yet, not an error
+    }
+    
+    *count = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), fp) && *count < max_count) {
+        // Format: tag|creator|timestamp|file_size
+        char *saveptr = NULL;
+        char *tag = strtok_r(line, "|", &saveptr);
+        char *creator = strtok_r(NULL, "|", &saveptr);
+        char *timestamp_str = strtok_r(NULL, "|", &saveptr);
+        char *size_str = strtok_r(NULL, "|", &saveptr);
+        
+        if (tag && creator && timestamp_str && size_str) {
+            strncpy(entries[*count].tag, tag, sizeof(entries[*count].tag) - 1);
+            entries[*count].tag[sizeof(entries[*count].tag) - 1] = '\0';
+            
+            strncpy(entries[*count].creator, creator, sizeof(entries[*count].creator) - 1);
+            entries[*count].creator[sizeof(entries[*count].creator) - 1] = '\0';
+            
+            entries[*count].timestamp = (time_t)atoll(timestamp_str);
+            entries[*count].file_size = (size_t)atoll(size_str);
+            (*count)++;
+        }
+    }
+    
+    fclose(fp);
+    return 0;
+}
+
+// Helper: Save checkpoint index
+static int save_checkpoint_index(const char *storage_dir, const char *filename,
+                                const CheckpointEntry *entries, int count) {
+    char index_path[700];
+    char tmp_path[710];
+    build_checkpoint_index_path(storage_dir, filename, index_path, sizeof(index_path));
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", index_path);
+    
+    FILE *fp = fopen(tmp_path, "w");
+    if (!fp) return -1;
+    
+    for (int i = 0; i < count; i++) {
+        fprintf(fp, "%s|%s|%ld|%zu\n",
+                entries[i].tag,
+                entries[i].creator,
+                (long)entries[i].timestamp,
+                entries[i].file_size);
+    }
+    
+    fclose(fp);
+    
+    if (rename(tmp_path, index_path) != 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+    
+    return 0;
+}
+
+int checkpoint_create(const char *storage_dir, const char *filename, 
+                     const char *tag, const char *creator) {
+    if (!storage_dir || !filename || !tag || !creator) return -1;
+    
+    // Validate tag
+    if (!is_valid_checkpoint_tag(tag)) {
+        return -1;
+    }
+    
+    // Check if file exists
+    if (!file_exists(storage_dir, filename)) {
+        return -1;
+    }
+    
+    // Create checkpoint directory
+    char checkpoint_dir[512];
+    build_checkpoint_dir(storage_dir, filename, checkpoint_dir, sizeof(checkpoint_dir));
+    mkdir_recursive(checkpoint_dir);
+    
+    // Load existing checkpoint index
+    CheckpointEntry entries[MAX_CHECKPOINTS_PER_FILE];
+    int count = 0;
+    load_checkpoint_index(storage_dir, filename, entries, &count, MAX_CHECKPOINTS_PER_FILE);
+    
+    // Check if tag already exists
+    for (int i = 0; i < count; i++) {
+        if (strcmp(entries[i].tag, tag) == 0) {
+            return -1;  // Tag already exists
+        }
+    }
+    
+    // Check if we've reached the limit
+    if (count >= MAX_CHECKPOINTS_PER_FILE) {
+        return -1;  // Too many checkpoints
+    }
+    
+    // Build paths
+    const char *norm_filename = normalize_filename(filename);
+    char src_file[512], src_meta[512];
+    char dst_data[700], dst_meta[700];
+    
+    snprintf(src_file, sizeof(src_file), "%s/files/%s", storage_dir, norm_filename);
+    snprintf(src_meta, sizeof(src_meta), "%s/metadata/%s.meta", storage_dir, norm_filename);
+    build_checkpoint_paths(storage_dir, filename, tag, dst_data, sizeof(dst_data),
+                          dst_meta, sizeof(dst_meta));
+    
+    // Copy file content
+    if (copy_file_atomic(src_file, dst_data) != 0) {
+        return -1;
+    }
+    
+    // Copy metadata
+    if (copy_file_atomic(src_meta, dst_meta) != 0) {
+        unlink(dst_data);
+        return -1;
+    }
+    
+    // Get file size
+    struct stat st;
+    size_t file_size = 0;
+    if (stat(src_file, &st) == 0) {
+        file_size = st.st_size;
+    }
+    
+    // Add to index
+    strncpy(entries[count].tag, tag, sizeof(entries[count].tag) - 1);
+    entries[count].tag[sizeof(entries[count].tag) - 1] = '\0';
+    
+    strncpy(entries[count].creator, creator, sizeof(entries[count].creator) - 1);
+    entries[count].creator[sizeof(entries[count].creator) - 1] = '\0';
+    
+    entries[count].timestamp = time(NULL);
+    entries[count].file_size = file_size;
+    count++;
+    
+    // Save index
+    if (save_checkpoint_index(storage_dir, filename, entries, count) != 0) {
+        // Cleanup
+        unlink(dst_data);
+        unlink(dst_meta);
+        return -1;
+    }
+    
+    return 0;
+}
+
+int checkpoint_exists(const char *storage_dir, const char *filename, const char *tag) {
+    if (!storage_dir || !filename || !tag) return 0;
+    
+    char data_path[700], meta_path[700];
+    build_checkpoint_paths(storage_dir, filename, tag, data_path, sizeof(data_path),
+                          meta_path, sizeof(meta_path));
+    
+    return (access(data_path, F_OK) == 0 && access(meta_path, F_OK) == 0) ? 1 : 0;
+}
+
+int checkpoint_restore(const char *storage_dir, const char *filename, const char *tag) {
+    if (!storage_dir || !filename || !tag) return -1;
+    
+    // Check if checkpoint exists
+    if (!checkpoint_exists(storage_dir, filename, tag)) {
+        return -1;
+    }
+    
+    // Build paths
+    const char *norm_filename = normalize_filename(filename);
+    char src_data[700], src_meta[700];
+    char dst_file[512], dst_meta[512];
+    
+    build_checkpoint_paths(storage_dir, filename, tag, src_data, sizeof(src_data),
+                          src_meta, sizeof(src_meta));
+    snprintf(dst_file, sizeof(dst_file), "%s/files/%s", storage_dir, norm_filename);
+    snprintf(dst_meta, sizeof(dst_meta), "%s/metadata/%s.meta", storage_dir, norm_filename);
+    
+    // Restore file content
+    if (copy_file_atomic(src_data, dst_file) != 0) {
+        return -1;
+    }
+    
+    // Restore metadata
+    if (copy_file_atomic(src_meta, dst_meta) != 0) {
+        return -1;
+    }
+    
+    return 0;
+}
+
+int checkpoint_list(const char *storage_dir, const char *filename, 
+                   CheckpointEntry **entries, int *count) {
+    if (!storage_dir || !filename || !entries || !count) return -1;
+    
+    // Allocate array for entries
+    CheckpointEntry *arr = (CheckpointEntry *)malloc(sizeof(CheckpointEntry) * MAX_CHECKPOINTS_PER_FILE);
+    if (!arr) return -1;
+    
+    // Load index
+    if (load_checkpoint_index(storage_dir, filename, arr, count, MAX_CHECKPOINTS_PER_FILE) != 0) {
+        free(arr);
+        return -1;
+    }
+    
+    *entries = arr;
+    return 0;
+}
+
+int checkpoint_get_content(const char *storage_dir, const char *filename, 
+                          const char *tag, char *content_buf, 
+                          size_t buf_size, size_t *actual_size) {
+    if (!storage_dir || !filename || !tag || !content_buf) return -1;
+    
+    // Check if checkpoint exists
+    if (!checkpoint_exists(storage_dir, filename, tag)) {
+        return -1;
+    }
+    
+    // Build checkpoint data path
+    char data_path[700], meta_path[700];
+    build_checkpoint_paths(storage_dir, filename, tag, data_path, sizeof(data_path),
+                          meta_path, sizeof(meta_path));
+    
+    // Read checkpoint file
+    FILE *fp = fopen(data_path, "rb");
+    if (!fp) return -1;
+    
+    size_t bytes_read = fread(content_buf, 1, buf_size - 1, fp);
+    fclose(fp);
+    
+    content_buf[bytes_read] = '\0';
+    
+    if (actual_size) {
+        *actual_size = bytes_read;
+    }
+    
+    return 0;
+}
+

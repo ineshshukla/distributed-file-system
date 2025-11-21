@@ -902,6 +902,293 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
             close(client_fd);
             return;
         }
+        // Handle CHECKPOINT command
+        else if (strcmp(cmd_msg.type, "CHECKPOINT") == 0) {
+            // Payload format: "filename|tag"
+            char filename[256] = {0};
+            char tag[64] = {0};
+            const char *username = cmd_msg.username;
+            
+            // Parse payload
+            char *sep = strchr(cmd_msg.payload, '|');
+            if (!sep) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INVALID", "Invalid checkpoint payload format",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            size_t filename_len = sep - cmd_msg.payload;
+            if (filename_len >= sizeof(filename)) filename_len = sizeof(filename) - 1;
+            memcpy(filename, cmd_msg.payload, filename_len);
+            filename[filename_len] = '\0';
+            
+            strncpy(tag, sep + 1, sizeof(tag) - 1);
+            tag[sizeof(tag) - 1] = '\0';
+            
+            log_info("ss_cmd_checkpoint", "file=%s tag=%s user=%s", filename, tag, username);
+            
+            // Check if file exists
+            if (!file_exists(ctx->storage_dir, filename)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "NOT_FOUND", "File not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Create checkpoint
+            if (checkpoint_create(ctx->storage_dir, filename, tag, username) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "CHECKPOINT_FAILED", "Failed to create checkpoint (tag may exist or limit reached)",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Send success
+            Message ack = {0};
+            snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+            snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            snprintf(ack.username, sizeof(ack.username), "%s", username);
+            snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+            snprintf(ack.payload, sizeof(ack.payload), "Checkpoint '%s' created successfully!", tag);
+            
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            log_info("ss_checkpoint_created", "file=%s tag=%s", filename, tag);
+            close(client_fd);
+            return;
+        }
+        // Handle VIEWCHECKPOINT command
+        else if (strcmp(cmd_msg.type, "VIEWCHECKPOINT") == 0) {
+            // Payload format: "filename|tag"
+            char filename[256] = {0};
+            char tag[64] = {0};
+            const char *username = cmd_msg.username;
+            
+            // Parse payload
+            char *sep = strchr(cmd_msg.payload, '|');
+            if (!sep) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INVALID", "Invalid payload format",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            size_t filename_len = sep - cmd_msg.payload;
+            if (filename_len >= sizeof(filename)) filename_len = sizeof(filename) - 1;
+            memcpy(filename, cmd_msg.payload, filename_len);
+            filename[filename_len] = '\0';
+            
+            strncpy(tag, sep + 1, sizeof(tag) - 1);
+            tag[sizeof(tag) - 1] = '\0';
+            
+            log_info("ss_cmd_viewcheckpoint", "file=%s tag=%s user=%s", filename, tag, username);
+            
+            // Check if checkpoint exists
+            if (!checkpoint_exists(ctx->storage_dir, filename, tag)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "NOT_FOUND", "Checkpoint not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Get checkpoint content
+            char content[65536];  // 64KB buffer
+            size_t actual_size = 0;
+            if (checkpoint_get_content(ctx->storage_dir, filename, tag, content, 
+                                      sizeof(content), &actual_size) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INTERNAL", "Failed to read checkpoint",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Send content
+            Message ack = {0};
+            snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+            snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            snprintf(ack.username, sizeof(ack.username), "%s", username);
+            snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+            snprintf(ack.payload, sizeof(ack.payload), "%.*s", 
+                    (int)(sizeof(ack.payload) - 1), content);
+            
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            log_info("ss_viewcheckpoint_success", "file=%s tag=%s", filename, tag);
+            close(client_fd);
+            return;
+        }
+        // Handle REVERT command
+        else if (strcmp(cmd_msg.type, "REVERT") == 0) {
+            // Payload format: "filename|tag"
+            char filename[256] = {0};
+            char tag[64] = {0};
+            const char *username = cmd_msg.username;
+            
+            // Parse payload
+            char *sep = strchr(cmd_msg.payload, '|');
+            if (!sep) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INVALID", "Invalid payload format",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            size_t filename_len = sep - cmd_msg.payload;
+            if (filename_len >= sizeof(filename)) filename_len = sizeof(filename) - 1;
+            memcpy(filename, cmd_msg.payload, filename_len);
+            filename[filename_len] = '\0';
+            
+            strncpy(tag, sep + 1, sizeof(tag) - 1);
+            tag[sizeof(tag) - 1] = '\0';
+            
+            log_info("ss_cmd_revert", "file=%s tag=%s user=%s", filename, tag, username);
+            
+            // Check if checkpoint exists
+            if (!checkpoint_exists(ctx->storage_dir, filename, tag)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "NOT_FOUND", "Checkpoint not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Save current state as undo before reverting
+            if (undo_save_state(ctx->storage_dir, filename) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INTERNAL", "Failed to save undo state",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Restore checkpoint
+            if (checkpoint_restore(ctx->storage_dir, filename, tag) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INTERNAL", "Failed to restore checkpoint",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Send success
+            Message ack = {0};
+            snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+            snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            snprintf(ack.username, sizeof(ack.username), "%s", username);
+            snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+            snprintf(ack.payload, sizeof(ack.payload), "Reverted to checkpoint '%s' successfully!", tag);
+            
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            log_info("ss_revert_success", "file=%s tag=%s", filename, tag);
+            close(client_fd);
+            return;
+        }
+        // Handle LISTCHECKPOINTS command
+        else if (strcmp(cmd_msg.type, "LISTCHECKPOINTS") == 0) {
+            const char *filename = cmd_msg.payload;
+            const char *username = cmd_msg.username;
+            
+            log_info("ss_cmd_listcheckpoints", "file=%s user=%s", filename, username);
+            
+            // Check if file exists
+            if (!file_exists(ctx->storage_dir, filename)) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "NOT_FOUND", "File not found",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Get checkpoint list
+            CheckpointEntry *entries = NULL;
+            int count = 0;
+            if (checkpoint_list(ctx->storage_dir, filename, &entries, &count) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, username, "SS",
+                                   "INTERNAL", "Failed to list checkpoints",
+                                   error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Format checkpoint list
+            char list_buf[1700];  // Fit in payload
+            int offset = 0;
+            
+            if (count == 0) {
+                (void)snprintf(list_buf, sizeof(list_buf),
+                              "No checkpoints found");
+            } else {
+                for (int i = 0; i < count && offset < (int)sizeof(list_buf) - 100; i++) {
+                    char time_str[32];
+                    struct tm *tm_info = localtime(&entries[i].timestamp);
+                    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+                    
+                    offset += snprintf(list_buf + offset, sizeof(list_buf) - offset,
+                                      "%s|%s|%s|%zu",
+                                      entries[i].tag,
+                                      entries[i].creator,
+                                      time_str,
+                                      entries[i].file_size);
+                    
+                    if (i < count - 1) {
+                        offset += snprintf(list_buf + offset, sizeof(list_buf) - offset, "\n");
+                    }
+                }
+            }
+            
+            free(entries);
+            
+            // Send list
+            Message ack = {0};
+            snprintf(ack.type, sizeof(ack.type), "%s", "ACK");
+            snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+            snprintf(ack.username, sizeof(ack.username), "%s", username);
+            snprintf(ack.role, sizeof(ack.role), "%s", "SS");
+            snprintf(ack.payload, sizeof(ack.payload), "%s", list_buf);
+            
+            char ack_line[MAX_LINE];
+            proto_format_line(&ack, ack_line, sizeof(ack_line));
+            send_all(client_fd, ack_line, strlen(ack_line));
+            log_info("ss_listcheckpoints_success", "file=%s count=%d", filename, count);
+            close(client_fd);
+            return;
+        }
         // Handle UPDATE_ACL command (from NM)
         else if (strcmp(cmd_msg.type, "UPDATE_ACL") == 0) {
             // Payload format: "action=ADD|REMOVE,flag=R|W,filename=FILE,target_user=USER"

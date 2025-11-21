@@ -136,6 +136,38 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
             payload[0] = '\0';
         }
     }
+    // For CHECKPOINT: filename|tag
+    else if (strcmp(cmd->cmd, "CHECKPOINT") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For VIEWCHECKPOINT: filename|tag
+    else if (strcmp(cmd->cmd, "VIEWCHECKPOINT") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For REVERT: filename|tag
+    else if (strcmp(cmd->cmd, "REVERT") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For LISTCHECKPOINTS: filename
+    else if (strcmp(cmd->cmd, "LISTCHECKPOINTS") == 0) {
+        if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';
+        }
+    }
     // For CREATE_FOLDER, CREATEFOLDER, VIEWFOLDER, VIEW_FOLDER
     else if (strcmp(cmd->cmd, "CREATEFOLDER") == 0 || 
              strcmp(cmd->cmd, "CREATE_FOLDER") == 0 ||

@@ -273,6 +273,78 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         return;
     }
 
+    if (strcmp(msg->type, "CHECKPOINT") == 0) {
+        // Payload format: "filename|tag"
+        char filename[256] = {0};
+        char tag[64] = {0};
+        char *sep = strchr(msg->payload, '|');
+        if (sep) {
+            size_t filename_len = sep - msg->payload;
+            if (filename_len >= sizeof(filename)) filename_len = sizeof(filename) - 1;
+            memcpy(filename, msg->payload, filename_len);
+            filename[filename_len] = '\0';
+            
+            strncpy(tag, sep + 1, sizeof(tag) - 1);
+            tag[sizeof(tag) - 1] = '\0';
+            
+            log_info("nm_cmd_checkpoint", "user=%s file=%s tag=%s", msg->username, filename, tag);
+            handle_checkpoint(fd, msg->username, filename, tag);
+        }
+        return;
+    }
+
+    if (strcmp(msg->type, "VIEWCHECKPOINT") == 0) {
+        // Payload format: "filename|tag"
+        char filename[256] = {0};
+        char tag[64] = {0};
+        char *sep = strchr(msg->payload, '|');
+        if (sep) {
+            size_t filename_len = sep - msg->payload;
+            if (filename_len >= sizeof(filename)) filename_len = sizeof(filename) - 1;
+            memcpy(filename, msg->payload, filename_len);
+            filename[filename_len] = '\0';
+            
+            strncpy(tag, sep + 1, sizeof(tag) - 1);
+            tag[sizeof(tag) - 1] = '\0';
+            
+            log_info("nm_cmd_viewcheckpoint", "user=%s file=%s tag=%s", msg->username, filename, tag);
+            handle_viewcheckpoint(fd, msg->username, filename, tag);
+        }
+        return;
+    }
+
+    if (strcmp(msg->type, "REVERT") == 0) {
+        // Payload format: "filename|tag"
+        char filename[256] = {0};
+        char tag[64] = {0};
+        char *sep = strchr(msg->payload, '|');
+        if (sep) {
+            size_t filename_len = sep - msg->payload;
+            if (filename_len >= sizeof(filename)) filename_len = sizeof(filename) - 1;
+            memcpy(filename, msg->payload, filename_len);
+            filename[filename_len] = '\0';
+            
+            strncpy(tag, sep + 1, sizeof(tag) - 1);
+            tag[sizeof(tag) - 1] = '\0';
+            
+            log_info("nm_cmd_revert", "user=%s file=%s tag=%s", msg->username, filename, tag);
+            handle_revert_checkpoint(fd, msg->username, filename, tag);
+        }
+        return;
+    }
+
+    if (strcmp(msg->type, "LISTCHECKPOINTS") == 0) {
+        char filename[256] = {0};
+        size_t payload_len = strlen(msg->payload);
+        size_t copy_len = (payload_len < sizeof(filename) - 1) ? payload_len : sizeof(filename) - 1;
+        memcpy(filename, msg->payload, copy_len);
+        filename[copy_len] = '\0';
+
+        log_info("nm_cmd_listcheckpoints", "user=%s file=%s", msg->username, filename);
+        handle_listcheckpoints(fd, msg->username, filename);
+        return;
+    }
+
     if (strcmp(msg->type, "EXEC") == 0) {
         char filename[256] = {0};
         size_t payload_len = strlen(msg->payload);

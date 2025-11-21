@@ -1,5 +1,6 @@
 // Client: Interactive shell for file operations
 // Phase 2: Supports VIEW, CREATE, READ, DELETE, INFO, LIST commands
+#define _POSIX_C_SOURCE 200809L  // For strdup
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,7 +74,50 @@ static int send_command_and_receive(const ParsedCommand *cmd) {
         fflush(stdout);
     } else if (strcmp(resp.type, "ACK") == 0) {
         // Success response - print payload if non-empty, otherwise print a generic success message
-        if (strlen(resp.payload) > 0) {
+        
+        // Special handling for LISTCHECKPOINTS - format nicely
+        if (strcmp(cmd->cmd, "LISTCHECKPOINTS") == 0 && strlen(resp.payload) > 0) {
+            // Payload format: tag|creator|timestamp|filesize (one per line)
+            if (strstr(resp.payload, "No checkpoints") != NULL) {
+                printf("%s\n", resp.payload);
+            } else {
+                printf("Checkpoints for file '%s':\n", cmd->args[0]);
+                printf("------------------------------------------------------------\n");
+                printf("%-20s %-15s %-20s %s\n", "Tag", "Creator", "Created", "Size");
+                printf("------------------------------------------------------------\n");
+                
+                char *payload_copy = strdup(resp.payload);
+                if (payload_copy) {
+                    char *saveptr = NULL;
+                    char *line = strtok_r(payload_copy, "\n", &saveptr);
+                    while (line) {
+                        char tag[64] = {0}, creator[64] = {0}, timestamp[32] = {0};
+                        size_t filesize = 0;
+                        
+                        // Parse: tag|creator|timestamp|filesize
+                        char *field_saveptr = NULL;
+                        char *field = strtok_r(line, "|", &field_saveptr);
+                        if (field) strncpy(tag, field, sizeof(tag) - 1);
+                        field = strtok_r(NULL, "|", &field_saveptr);
+                        if (field) strncpy(creator, field, sizeof(creator) - 1);
+                        field = strtok_r(NULL, "|", &field_saveptr);
+                        if (field) strncpy(timestamp, field, sizeof(timestamp) - 1);
+                        field = strtok_r(NULL, "|", &field_saveptr);
+                        if (field) filesize = atoll(field);
+                        
+                        printf("%-20s %-15s %-20s %zu bytes\n", tag, creator, timestamp, filesize);
+                        line = strtok_r(NULL, "\n", &saveptr);
+                    }
+                    free(payload_copy);
+                }
+                printf("------------------------------------------------------------\n");
+            }
+        }
+        // Special handling for VIEWCHECKPOINT - just print content
+        else if (strcmp(cmd->cmd, "VIEWCHECKPOINT") == 0 && strlen(resp.payload) > 0) {
+            printf("%s\n", resp.payload);
+        }
+        else if (strlen(resp.payload) > 0) {
             printf("%s\n", resp.payload);
         } else {
             printf("Success\n");
