@@ -86,19 +86,43 @@ setup() {
     
     # Start Storage Servers
     echo "Starting Storage Servers..."
-    ./bin_ss storage_ss1 9001 9002 > /dev/null 2>&1 &
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9001 --storage storage_ss1 --username ss1 > /dev/null 2>&1 &
     SS1_PID=$!
     sleep 1
     
-    ./bin_ss storage_ss2 9011 9012 > /dev/null 2>&1 &
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9011 --storage storage_ss2 --username ss2 > /dev/null 2>&1 &
     SS2_PID=$!
     sleep 1
     
-    ./bin_ss storage_ss1_backup 9003 9004 > /dev/null 2>&1 &
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9021 --storage storage_ss3 --username ss3 > /dev/null 2>&1 &
+    SS3_PID=$!
+    sleep 1
+    
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9031 --storage storage_ss4 --username ss4 > /dev/null 2>&1 &
+    SS4_PID=$!
+    sleep 1
+    
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9041 --storage storage_ss5 --username ss5 > /dev/null 2>&1 &
+    SS5_PID=$!
+    sleep 1
+    
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9051 --storage storage_ss6 --username ss6 > /dev/null 2>&1 &
+    SS6_PID=$!
+    sleep 1
+    
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9061 --storage storage_ss7 --username ss7 > /dev/null 2>&1 &
+    SS7_PID=$!
+    sleep 1
+    
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9003 --storage storage_ss1_backup --username ss1_backup > /dev/null 2>&1 &
     SS1_BACKUP_PID=$!
+    sleep 1
+    
+    ./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --host 127.0.0.1 --client-port 9053 --storage storage_ss6_backup --username ss6_backup > /dev/null 2>&1 &
+    SS6_BACKUP_PID=$!
     sleep 2
     
-    echo "Storage Servers started"
+    echo "Storage Servers started (7 primary + 2 backups)"
     echo ""
 }
 
