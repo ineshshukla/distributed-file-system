@@ -247,5 +247,72 @@ int handle_move(int client_fd, const char *username, const char *filename,
 // 5. Sends response to client
 int handle_viewfolder(int client_fd, const char *username, const char *folder_path);
 
+// Handle REQUESTACCESS command (alias: RACC)
+// client_fd: File descriptor to send response to
+// username: Username of requesting client
+// payload: "filename|access_type" (e.g., "/documents/report.txt|R")
+// Returns: 0 on success, -1 on error
+//
+// REQUESTACCESS command: Request read/write access to a file
+//
+// This function:
+// 1. Parses filename and access type (R/W/RW)
+// 2. Looks up file (return NOT_FOUND if not exists)
+// 3. Checks user is not owner (return INVALID if owner)
+// 4. Fetches ACL and checks if user already has requested access
+// 5. Checks for duplicate pending request
+// 6. Adds request to queue
+// 7. Returns request ID to user
+int handle_requestaccess(int client_fd, const char *username, const char *payload);
+
+// Handle VIEWACCESSREQUESTS command (alias: VIEWACCR)
+// client_fd: File descriptor to send response to
+// username: Username of requesting client (file owner)
+// payload: Optional filename filter (empty for all requests)
+// Returns: 0 on success, -1 on error
+//
+// VIEWACCESSREQUESTS command: View pending access requests for your files
+//
+// This function:
+// 1. Optionally parses filename filter
+// 2. Gets all requests for files owned by user
+// 3. Formats as table with ID, requester, file, type, date
+// 4. Sends response to client
+int handle_viewaccessrequests(int client_fd, const char *username, const char *payload);
+
+// Handle APPROVEACCESSREQUEST command (alias: APPROVEACCR)
+// client_fd: File descriptor to send response to
+// username: Username of requesting client (file owner)
+// payload: Request ID
+// Returns: 0 on success, -1 on error
+//
+// APPROVEACCESSREQUEST command: Approve pending access request
+//
+// This function:
+// 1. Parses request ID
+// 2. Gets request from queue (return NOT_FOUND if not exists)
+// 3. Verifies user is owner (return UNAUTHORIZED if not)
+// 4. Looks up file (return NOT_FOUND if deleted)
+// 5. Sends ADDACCESS command to SS
+// 6. Removes request from queue on success
+// 7. Sends success response to client
+int handle_approveaccessrequest(int client_fd, const char *username, const char *payload);
+
+// Handle DISAPPROVEACCESSREQUEST command (alias: DISACCR)
+// client_fd: File descriptor to send response to
+// username: Username of requesting client (file owner)
+// payload: Request ID
+// Returns: 0 on success, -1 on error
+//
+// DISAPPROVEACCESSREQUEST command: Deny pending access request
+//
+// This function:
+// 1. Parses request ID
+// 2. Gets request from queue (return NOT_FOUND if not exists)
+// 3. Verifies user is owner (return UNAUTHORIZED if not)
+// 4. Removes request from queue
+// 5. Sends success response to client
+int handle_disapproveaccessrequest(int client_fd, const char *username, const char *payload);
+
 #endif
 

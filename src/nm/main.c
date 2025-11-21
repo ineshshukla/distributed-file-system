@@ -16,6 +16,7 @@
 #include "access_control.h"
 #include "commands.h"
 #include "registry.h"
+#include "access_requests.h"
 
 // Argument passed to each connection handler thread.
 typedef struct ClientConnArg {
@@ -431,6 +432,34 @@ static void handle_message(int fd, const struct sockaddr_in *peer, const Message
         return;
     }
     
+    // Handle REQUESTACCESS / RACC
+    if (strcmp(msg->type, "REQUESTACCESS") == 0 || strcmp(msg->type, "RACC") == 0) {
+        log_info("nm_cmd_requestaccess", "user=%s payload=%s", msg->username, msg->payload);
+        handle_requestaccess(fd, msg->username, msg->payload);
+        return;
+    }
+    
+    // Handle VIEWACCESSREQUESTS / VIEWACCR
+    if (strcmp(msg->type, "VIEWACCESSREQUESTS") == 0 || strcmp(msg->type, "VIEWACCR") == 0) {
+        log_info("nm_cmd_viewaccessrequests", "user=%s payload=%s", msg->username, msg->payload);
+        handle_viewaccessrequests(fd, msg->username, msg->payload);
+        return;
+    }
+    
+    // Handle APPROVEACCESSREQUEST / APPROVEACCR
+    if (strcmp(msg->type, "APPROVEACCESSREQUEST") == 0 || strcmp(msg->type, "APPROVEACCR") == 0) {
+        log_info("nm_cmd_approveaccessrequest", "user=%s payload=%s", msg->username, msg->payload);
+        handle_approveaccessrequest(fd, msg->username, msg->payload);
+        return;
+    }
+    
+    // Handle DISAPPROVEACCESSREQUEST / DISACCR
+    if (strcmp(msg->type, "DISAPPROVEACCESSREQUEST") == 0 || strcmp(msg->type, "DISACCR") == 0) {
+        log_info("nm_cmd_disapproveaccessrequest", "user=%s payload=%s", msg->username, msg->payload);
+        handle_disapproveaccessrequest(fd, msg->username, msg->payload);
+        return;
+    }
+    
     // Unknown command
     log_error("nm_unknown_msg", "type=%s", msg->type);
     Error err = error_create(ERR_INVALID, "Unknown command: %s", msg->type);
@@ -470,6 +499,10 @@ int main(int argc, char **argv) {
     // Step 3: Initialize file index and LRU cache
     index_init();
     log_info("nm_index_init", "File index initialized");
+    
+    // Initialize access request queue
+    request_queue_init();
+    log_info("nm_request_queue_init", "Access request queue initialized");
     
     signal(SIGINT, on_sigint);
     int server_fd = create_server_socket(host, port);

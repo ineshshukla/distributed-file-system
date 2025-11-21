@@ -12,6 +12,7 @@
 #include "../common/net.h"
 #include "../common/log.h"
 #include "registry.h"
+#include "access_requests.h"
 
 #define MAX_SS_CANDIDATES 64
 
@@ -804,6 +805,10 @@ int handle_delete(int client_fd, const char *username, const char *filename) {
     if (index_remove_file(filename) == 0) {
         log_info("nm_file_deleted", "file=%s owner=%s", filename, username);
         registry_adjust_ss_file_count(entry->ss_username, -1);
+        
+        // Remove any pending access requests for this file
+        request_queue_remove_by_filename(entry->filename, entry->folder_path);
+        
         return send_success_response(client_fd, "", username, "File deleted successfully!");
     } else {
         Error err = error_simple(ERR_INTERNAL, "Failed to remove file from index");
@@ -1465,6 +1470,11 @@ int handle_move(int client_fd, const char *username, const char *filename,
     // Update index
     index_move_file(entry->filename, entry->folder_path, new_folder_path);
     
+    // Update pending access requests with new folder path
+    // Filename stays the same, only folder changes
+    request_queue_update_filename(entry->filename, entry->folder_path,
+                                   entry->filename, new_folder_path);
+    
     log_info("nm_file_moved", "file=%s user=%s from=%s to=%s", 
              filename, username, entry->folder_path, new_folder_path);
     return send_success_response(client_fd, "", username, "File moved successfully!");
@@ -1546,5 +1556,393 @@ int handle_viewfolder(int client_fd, const char *username, const char *folder_pa
     log_info("nm_viewfolder", "folder=%s user=%s files=%d folders=%d", 
              folder_path, username, file_count, folder_count);
     return send_data_response(client_fd, "", username, response);
+}
+
+// Handle REQUESTACCESS command
+// Payload format: "filename|access_type" (e.g., "/documents/report.txt|R")
+int handle_requestaccess(int client_fd, const char *username, const char *payload) {
+    if (!username || !payload) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Parse payload: filename|access_type
+    char filename[256] = {0};
+    char access_type_str[8] = {0};
+    
+    const char *pipe = strchr(payload, '|');
+    if (!pipe) {
+        Error err = error_simple(ERR_INVALID, "Invalid payload format. Expected: filename|access_type");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    size_t filename_len = pipe - payload;
+    if (filename_len >= sizeof(filename)) {
+        Error err = error_simple(ERR_INVALID, "Filename too long");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    memcpy(filename, payload, filename_len);
+    filename[filename_len] = '\0';
+    
+    strncpy(access_type_str, pipe + 1, sizeof(access_type_str) - 1);
+    
+    // Parse access type: R, W, or RW/B
+    char access_type;
+    if (strcmp(access_type_str, "R") == 0) {
+        access_type = 'R';
+    } else if (strcmp(access_type_str, "W") == 0) {
+        access_type = 'W';
+    } else if (strcmp(access_type_str, "RW") == 0 || strcmp(access_type_str, "B") == 0) {
+        access_type = 'B';
+    } else {
+        Error err = error_simple(ERR_INVALID, "Invalid access type. Use R, W, or RW");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Lookup file
+    FileEntry *entry = index_lookup_file(filename);
+    if (!entry) {
+        Error err = error_create(ERR_NOT_FOUND, "File '%s' not found", filename);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if user is the owner
+    if (strcmp(entry->owner, username) == 0) {
+        Error err = error_simple(ERR_INVALID, "Cannot request access to your own file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check existing ACL from SS
+    ACL acl = {0};
+    if (fetch_acl_from_ss(entry, &acl) != 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to load file ACL");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Check if user already has the requested access or more
+    int has_read = acl_check_read(&acl, username);
+    int has_write = acl_check_write(&acl, username);
+    
+    if (access_type == 'R' && has_read) {
+        Error err = error_simple(ERR_INVALID, "You already have read access to this file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    if (access_type == 'W' && has_write) {
+        Error err = error_simple(ERR_INVALID, "You already have write access to this file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    if (access_type == 'B' && has_read && has_write) {
+        Error err = error_simple(ERR_INVALID, "You already have read/write access to this file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Add request to queue
+    int request_id = request_queue_add(entry->filename, entry->folder_path, 
+                                      username, entry->owner, access_type);
+    
+    if (request_id == -2) {
+        Error err = error_simple(ERR_CONFLICT, "You already have a pending request for this file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    if (request_id < 0) {
+        Error err = error_simple(ERR_INTERNAL, "Failed to create access request");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Access request created with ID #%d", request_id);
+    log_info("nm_access_request_created", "id=%d file=%s user=%s owner=%s type=%c",
+             request_id, filename, username, entry->owner, access_type);
+    
+    return send_success_response(client_fd, "", username, msg);
+}
+
+// Handle VIEWACCESSREQUESTS command
+// Payload: optional filename (empty for all requests)
+int handle_viewaccessrequests(int client_fd, const char *username, const char *payload) {
+    if (!username) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Parse optional filename filter
+    char filename[256] = {0};
+    char folder_path[512] = {0};
+    const char *filter_filename = NULL;
+    const char *filter_folder_path = NULL;
+    
+    if (payload && payload[0] != '\0') {
+        strncpy(filename, payload, sizeof(filename) - 1);
+        
+        // Parse into folder_path and base filename
+        const char *last_slash = strrchr(filename, '/');
+        if (last_slash) {
+            size_t folder_len = last_slash - filename + 1;
+            if (folder_len < sizeof(folder_path)) {
+                memcpy(folder_path, filename, folder_len);
+                folder_path[folder_len] = '\0';
+                filter_folder_path = folder_path;
+            }
+            strcpy(filename, last_slash + 1);
+            filter_filename = filename;
+        } else {
+            strcpy(folder_path, "/");
+            filter_folder_path = folder_path;
+            filter_filename = filename;
+        }
+    }
+    
+    // Get requests for this user's files
+    int count = 0;
+    AccessRequest **requests = request_queue_get_by_owner_filtered(username, 
+                                                                   filter_filename,
+                                                                   filter_folder_path,
+                                                                   &count);
+    
+    if (count == 0 || !requests) {
+        const char *msg = payload && payload[0] ? "No pending requests for this file" : "No pending access requests";
+        free(requests);
+        return send_data_response(client_fd, "", username, msg);
+    }
+    
+    // Build response
+    char response[8192] = {0};
+    char *p = response;
+    size_t remaining = sizeof(response);
+    
+    int written = snprintf(p, remaining, "Pending Access Requests:\n");
+    if (written > 0) { p += written; remaining -= written; }
+    
+    written = snprintf(p, remaining, 
+                      "-----------------------------------------------------------------------\n"
+                      "|   ID  | Requester    | File                     | Type | Date       |\n"
+                      "|-------|--------------|--------------------------|------|------------|\n");
+    if (written > 0) { p += written; remaining -= written; }
+    
+    for (int i = 0; i < count && remaining > 100; i++) {
+        AccessRequest *req = requests[i];
+        
+        // Build full path
+        char full_path[768];
+        if (strcmp(req->folder_path, "/") == 0) {
+            snprintf(full_path, sizeof(full_path), "%s", req->filename);
+        } else {
+            size_t folder_len = strlen(req->folder_path);
+            if (folder_len > 0 && req->folder_path[folder_len - 1] == '/') {
+                snprintf(full_path, sizeof(full_path), "%.*s/%s",
+                        (int)(folder_len - 1), req->folder_path, req->filename);
+            } else {
+                snprintf(full_path, sizeof(full_path), "%s/%s", req->folder_path, req->filename);
+            }
+        }
+        
+        // Format access type
+        const char *type_str = (req->access_type == 'R') ? "R" :
+                              (req->access_type == 'W') ? "W" : "RW";
+        
+        // Format date
+        char date_str[16];
+        struct tm *tm = localtime(&req->requested_at);
+        strftime(date_str, sizeof(date_str), "%Y-%m-%d", tm);
+        
+        // Truncate long paths
+        char short_path[25];
+        if (strlen(full_path) > 24) {
+            snprintf(short_path, sizeof(short_path), "%.21s...", full_path);
+        } else {
+            snprintf(short_path, sizeof(short_path), "%s", full_path);
+        }
+        
+        written = snprintf(p, remaining, "| #%-4d | %-12s | %-24s | %-4s | %-10s |\n",
+                          req->request_id, req->requester, short_path, type_str, date_str);
+        if (written > 0) { p += written; remaining -= written; }
+    }
+    
+    written = snprintf(p, remaining, "-----------------------------------------------------------------------\n");
+    if (written > 0) { p += written; remaining -= written; }
+    
+    free(requests);
+    
+    log_info("nm_viewaccessrequests", "user=%s count=%d", username, count);
+    return send_data_response(client_fd, "", username, response);
+}
+
+// Handle APPROVEACCESSREQUEST command
+// Payload: request_id
+int handle_approveaccessrequest(int client_fd, const char *username, const char *payload) {
+    if (!username || !payload) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    int request_id = atoi(payload);
+    if (request_id <= 0) {
+        Error err = error_simple(ERR_INVALID, "Invalid request ID");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step1", "Looking up request_id=%d", request_id);
+    
+    // Get the request
+    AccessRequest *req = request_queue_get_by_id(request_id);
+    if (!req) {
+        log_error("nm_approve_fail", "Request ID %d not found", request_id);
+        Error err = error_simple(ERR_NOT_FOUND, "Request not found");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step2", "Found request id=%d file=%s requester=%s owner=%s", 
+             request_id, req->filename, req->requester, req->owner);
+    
+    // Verify user is the owner
+    if (strcmp(req->owner, username) != 0) {
+        log_error("nm_approve_fail", "User %s is not owner (owner is %s)", username, req->owner);
+        Error err = error_simple(ERR_UNAUTHORIZED, "You are not the owner of this file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step3", "Building full path from folder=%s filename=%s", 
+             req->folder_path, req->filename);
+    
+    // Build full path for file lookup
+    char full_path[768];
+    if (strcmp(req->folder_path, "/") == 0) {
+        snprintf(full_path, sizeof(full_path), "/%s", req->filename);
+    } else {
+        size_t folder_len = strlen(req->folder_path);
+        if (folder_len > 0 && req->folder_path[folder_len - 1] == '/') {
+            snprintf(full_path, sizeof(full_path), "%s%s", req->folder_path, req->filename);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", req->folder_path, req->filename);
+        }
+    }
+    
+    log_info("nm_approve_step4", "Looking up file with path: %s", full_path);
+    
+    // Lookup file to get SS info
+    FileEntry *entry = index_lookup_file(full_path);
+    if (!entry) {
+        // File was deleted - remove request
+        log_error("nm_approve_fail", "File %s not found in index", full_path);
+        request_queue_remove(request_id);
+        Error err = error_simple(ERR_NOT_FOUND, "File no longer exists");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step5", "File found, connecting to SS %s:%d", 
+             entry->ss_host, entry->ss_client_port);
+    
+    // Connect to SS and send ADDACCESS command
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd < 0) {
+        log_error("nm_approve_fail", "Failed to connect to SS");
+        Error err = error_simple(ERR_UNAVAILABLE, "Cannot connect to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step6", "Connected to SS, building UPDATE_ACL payload");
+    
+    // Build UPDATE_ACL payload: action=ADD,flag=R|W,filename=FILE,target_user=USER
+    char ss_payload[1024];
+    const char *perm = (req->access_type == 'R') ? "R" :
+                      (req->access_type == 'W') ? "W" : "B";
+    snprintf(ss_payload, sizeof(ss_payload), "action=ADD,flag=%s,filename=%s,target_user=%s",
+             perm, full_path, req->requester);
+    
+    log_info("nm_approve_step7", "Sending UPDATE_ACL to SS: payload=%s", ss_payload);
+    
+    Message ss_req = {0};
+    snprintf(ss_req.type, sizeof(ss_req.type), "UPDATE_ACL");
+    snprintf(ss_req.id, sizeof(ss_req.id), "1");
+    snprintf(ss_req.username, sizeof(ss_req.username), "%s", username);
+    snprintf(ss_req.role, sizeof(ss_req.role), "NM");
+    snprintf(ss_req.payload, sizeof(ss_req.payload), "%s", ss_payload);
+    
+    char req_buf[MAX_LINE];
+    proto_format_line(&ss_req, req_buf, sizeof(req_buf));
+    
+    if (send_all(ss_fd, req_buf, strlen(req_buf)) != 0) {
+        close(ss_fd);
+        log_error("nm_approve_fail", "Failed to send to SS");
+        Error err = error_simple(ERR_INTERNAL, "Failed to send command to storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step8", "Waiting for SS response");
+    
+    // Wait for response
+    char resp_buf[MAX_LINE];
+    int n = recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+    close(ss_fd);
+    
+    log_info("nm_approve_step9", "Got SS response: n=%d", n);
+    
+    if (n <= 0) {
+        log_error("nm_approve_fail", "No response from SS");
+        Error err = error_simple(ERR_INTERNAL, "No response from storage server");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step10", "Parsing SS response: %s", resp_buf);
+    
+    Message ss_resp;
+    proto_parse_line(resp_buf, &ss_resp);
+    
+    if (strcmp(ss_resp.type, "ERROR") == 0) {
+        char error_code[64], error_msg[256];
+        proto_parse_error(&ss_resp, error_code, sizeof(error_code), error_msg, sizeof(error_msg));
+        log_error("nm_approve_fail", "SS returned error: %s", error_msg);
+        Error err = error_simple(ERR_INTERNAL, error_msg);
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    log_info("nm_approve_step11", "SS success, removing request from queue");
+    
+    // Success - remove request from queue
+    request_queue_remove(request_id);
+    
+    char msg[1024];
+    snprintf(msg, sizeof(msg), "Access granted to %s for file %s", req->requester, full_path);
+    log_info("nm_access_request_approved", "id=%d file=%s requester=%s owner=%s type=%c",
+             request_id, full_path, req->requester, username, req->access_type);
+    
+    return send_success_response(client_fd, "", username, msg);
+}
+
+// Handle DISAPPROVEACCESSREQUEST command
+// Payload: request_id
+int handle_disapproveaccessrequest(int client_fd, const char *username, const char *payload) {
+    if (!username || !payload) {
+        Error err = error_simple(ERR_INVALID, "Invalid parameters");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    int request_id = atoi(payload);
+    if (request_id <= 0) {
+        Error err = error_simple(ERR_INVALID, "Invalid request ID");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Get the request
+    AccessRequest *req = request_queue_get_by_id(request_id);
+    if (!req) {
+        Error err = error_simple(ERR_NOT_FOUND, "Request not found");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Verify user is the owner
+    if (strcmp(req->owner, username) != 0) {
+        Error err = error_simple(ERR_UNAUTHORIZED, "You are not the owner of this file");
+        return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Remove request from queue
+    request_queue_remove(request_id);
+    
+    log_info("nm_access_request_denied", "id=%d requester=%s owner=%s",
+             request_id, req->requester, username);
+    
+    return send_success_response(client_fd, "", username, "Access request denied");
 }
 

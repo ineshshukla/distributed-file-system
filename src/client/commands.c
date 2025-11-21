@@ -78,6 +78,18 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
                           char *buf, size_t buflen) {
     if (!cmd || !username || !buf || buflen == 0) return -1;
     
+    // Map aliases to full command names
+    const char *message_type = cmd->cmd;
+    if (strcmp(cmd->cmd, "RACC") == 0) {
+        message_type = "REQUESTACCESS";
+    } else if (strcmp(cmd->cmd, "VIEWACCR") == 0) {
+        message_type = "VIEWACCESSREQUESTS";
+    } else if (strcmp(cmd->cmd, "APPROVEACCR") == 0) {
+        message_type = "APPROVEACCESSREQUEST";
+    } else if (strcmp(cmd->cmd, "DISACCR") == 0) {
+        message_type = "DISAPPROVEACCESSREQUEST";
+    }
+    
     // Build payload based on command type
     char payload[1024] = {0};
     
@@ -135,6 +147,39 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
             payload[0] = '\0';
         }
     }
+    // For REQUESTACCESS / RACC: filename|access_type
+    else if (strcmp(message_type, "REQUESTACCESS") == 0) {
+        if (cmd->argc >= 2) {
+            (void)snprintf(payload, sizeof(payload), "%s|%s", cmd->args[0], cmd->args[1]);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For VIEWACCESSREQUESTS / VIEWACCR: optional filename filter
+    else if (strcmp(message_type, "VIEWACCESSREQUESTS") == 0) {
+        if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';  // No filter = all requests
+        }
+    }
+    // For APPROVEACCESSREQUEST / APPROVEACCR: request_id
+    else if (strcmp(message_type, "APPROVEACCESSREQUEST") == 0) {
+        // printf("DEBUG: reached here\n");
+        if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';
+        }
+    }
+    // For DISAPPROVEACCESSREQUEST / DISACCR: request_id
+    else if (strcmp(message_type, "DISAPPROVEACCESSREQUEST") == 0) {
+        if (cmd->argc >= 1) {
+            strncpy(payload, cmd->args[0], sizeof(payload) - 1);
+        } else {
+            payload[0] = '\0';
+        }
+    }
     // For commands with arguments (CREATE, DELETE, INFO, READ, STREAM, UNDO, EXEC, etc.)
     else if (cmd->argc > 0) {
         // First argument is the filename (or whatever the command needs)
@@ -147,9 +192,9 @@ int format_command_message(const ParsedCommand *cmd, const char *username,
     
     // Format message
     Message msg = {0};
-    size_t cmd_len = strlen(cmd->cmd);
+    size_t cmd_len = strlen(message_type);
     size_t copy_len = (cmd_len < sizeof(msg.type) - 1) ? cmd_len : sizeof(msg.type) - 1;
-    memcpy(msg.type, cmd->cmd, copy_len);
+    memcpy(msg.type, message_type, copy_len);
     msg.type[copy_len] = '\0';
     
     (void)snprintf(msg.id, sizeof(msg.id), "%ld", (long)time(NULL));  // Use timestamp as ID
