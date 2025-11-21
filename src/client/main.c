@@ -23,6 +23,7 @@ static int handle_ss_command(const ParsedCommand *cmd, const char *ss_host, int 
 static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 static int perform_undo_command(const ParsedCommand *cmd, const char *ss_host, int ss_port);
 static void print_payload_with_newlines(const char *payload);
+static void print_help_message(void);
 
 // Send command to NM and receive response
 // Returns: 0 on success, -1 on error
@@ -409,6 +410,32 @@ static void print_payload_with_newlines(const char *payload) {
     }
 }
 
+static void print_help_message(void) {
+    printf("Available commands:\n");
+    printf("  VIEW [-a] [-l]                List files (accessible/all, optionally detailed)\n");
+    printf("  CREATE <file>                 Create an empty file\n");
+    printf("  DELETE <file>                 Delete a file you own\n");
+    printf("  INFO <file>                   Show metadata for a file\n");
+    printf("  LIST                          List all registered users\n");
+    printf("  READ <file>                   Read entire file content\n");
+    printf("  STREAM <file>                 Stream file word-by-word (0.1s delay)\n");
+    printf("  WRITE <file> <sentence>       Lock a sentence and edit words interactively\n");
+    printf("  UNDO <file>                   Revert the last WRITE (requires write access)\n");
+    printf("  ADDACCESS -R/-W <file> <user> Grant read or read/write access\n");
+    printf("  REMACCESS <file> <user>       Remove access\n");
+    printf("  EXEC <file>                   Execute the file as a bash script\n");
+    printf("  CHECKPOINT/VIEWCHECKPOINT/REVERT/LISTCHECKPOINTS <file> [tag]\n");
+    printf("                                Manage checkpoints\n");
+    printf("  CREATEFOLDER <path>           Create folder (bonus)\n");
+    printf("  VIEWFOLDER <path>             List contents of a folder\n");
+    printf("  MOVE <file> <folder>          Move file into folder\n");
+    printf("  RACC / VIEWACCR / APPROVEACCR / DISACCR ...\n");
+    printf("                                Access request workflow commands\n");
+    printf("  HELP                          Show this help message\n");
+    printf("  EXIT                          Quit the client\n\n");
+    printf("WRITE usage: enter multiple '<word_index> <content>' lines (0-based). Use ETIRW to commit.\n");
+}
+
 static int perform_write_session(const ParsedCommand *cmd, const char *ss_host, int ss_port) {
     if (cmd->argc < 2) {
         printf("Error: WRITE requires filename and sentence index\n");
@@ -717,6 +744,13 @@ static void command_loop(void) {
         if (strcmp(cmd.cmd, "EXIT") == 0) {
             printf("Exiting...\n");
             break;
+        }
+
+        if (strcmp(cmd.cmd, "HELP") == 0) {
+            print_help_message();
+            printf("> ");
+            fflush(stdout);
+            continue;
         }
         
         // Validate command arguments
