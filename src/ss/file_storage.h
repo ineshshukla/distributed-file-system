@@ -29,6 +29,15 @@ typedef struct {
     int char_count;
 } SentenceMeta;
 
+// Access request stored in metadata
+#define MAX_PENDING_REQUESTS 64
+typedef struct {
+    int request_id;
+    char requester[64];
+    char access_type;  // 'R', 'W', or 'B'
+    time_t timestamp;
+} PendingRequest;
+
 // File metadata structure - stores all information about a file
 typedef struct {
     char owner[64];           // Username of file owner
@@ -45,6 +54,10 @@ typedef struct {
     int sentence_count;
     int next_sentence_id;
     SentenceMeta sentences[MAX_SENTENCE_METADATA];
+    
+    // Access requests (persistent)
+    int pending_request_count;
+    PendingRequest pending_requests[MAX_PENDING_REQUESTS];
 } FileMetadata;
 
 // Create an empty file in the storage directory

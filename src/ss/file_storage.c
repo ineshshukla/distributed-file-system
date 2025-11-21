@@ -393,7 +393,47 @@ int metadata_load(const char *storage_dir, const char *filename, FileMetadata *m
             
             // Deserialize ACL
             acl_deserialize(&metadata->acl, acl_buf);
-            break;  // ACL is last section
+            // Don't break - continue reading pending requests
+        } else if (strncmp(line, "pending_request_count=", 22) == 0) {
+            int count = atoi(line + 22);
+            if (count < 0) count = 0;
+            if (count > MAX_PENDING_REQUESTS) count = MAX_PENDING_REQUESTS;
+            metadata->pending_request_count = count;
+        } else if (strncmp(line, "pending_request_", 16) == 0) {
+            char *eq = strchr(line, '=');
+            if (!eq) {
+                line = strtok_r(NULL, "\n", &saveptr);
+                continue;
+            }
+            int idx = atoi(line + 16);
+            if (idx < 0 || idx >= MAX_PENDING_REQUESTS) {
+                line = strtok_r(NULL, "\n", &saveptr);
+                continue;
+            }
+            PendingRequest *req = &metadata->pending_requests[idx];
+            int request_id = 0;
+            char requester[64] = {0};
+            char access_type = 'R';
+            long timestamp = 0;
+            
+            // Parse: request_id,requester,access_type,timestamp
+            char *field_saveptr = NULL;
+            char *field = strtok_r(eq + 1, ",", &field_saveptr);
+            if (field) request_id = atoi(field);
+            field = strtok_r(NULL, ",", &field_saveptr);
+            if (field) strncpy(requester, field, sizeof(requester) - 1);
+            field = strtok_r(NULL, ",", &field_saveptr);
+            if (field) access_type = field[0];
+            field = strtok_r(NULL, ",", &field_saveptr);
+            if (field) timestamp = atol(field);
+            
+            req->request_id = request_id;
+            size_t req_len = strlen(requester);
+            if (req_len >= sizeof(req->requester)) req_len = sizeof(req->requester) - 1;
+            memcpy(req->requester, requester, req_len);
+            req->requester[req_len] = '\0';
+            req->access_type = access_type;
+            req->timestamp = (time_t)timestamp;
         }
         line = strtok_r(NULL, "\n", &saveptr);
     }
@@ -466,6 +506,14 @@ int metadata_save(const char *storage_dir, const char *filename, const FileMetad
         fprintf(fp, "%s", acl_buf);
     }
     fprintf(fp, "ACL_END\n");
+    
+    // Write pending access requests
+    fprintf(fp, "pending_request_count=%d\n", metadata->pending_request_count);
+    for (int i = 0; i < metadata->pending_request_count && i < MAX_PENDING_REQUESTS; i++) {
+        const PendingRequest *req = &metadata->pending_requests[i];
+        fprintf(fp, "pending_request_%d=%d,%s,%c,%ld\n",
+                i, req->request_id, req->requester, req->access_type, (long)req->timestamp);
+    }
     
     fclose(fp);
     

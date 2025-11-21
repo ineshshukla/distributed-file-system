@@ -1650,6 +1650,31 @@ int handle_requestaccess(int client_fd, const char *username, const char *payloa
         return send_error_response(client_fd, "", username, &err);
     }
     
+    // Persist request to SS metadata
+    int ss_fd = get_ss_connection_for_file(entry);
+    if (ss_fd >= 0) {
+        char ss_payload[512];
+        snprintf(ss_payload, sizeof(ss_payload), "%s|%d|%s|%c", 
+                 filename, request_id, username, access_type);
+        
+        Message ss_req = {0};
+        snprintf(ss_req.type, sizeof(ss_req.type), "ADD_REQUEST");
+        snprintf(ss_req.id, sizeof(ss_req.id), "1");
+        snprintf(ss_req.username, sizeof(ss_req.username), "%s", entry->owner);
+        snprintf(ss_req.role, sizeof(ss_req.role), "NM");
+        snprintf(ss_req.payload, sizeof(ss_req.payload), "%s", ss_payload);
+        
+        char req_buf[MAX_LINE];
+        proto_format_line(&ss_req, req_buf, sizeof(req_buf));
+        send_all(ss_fd, req_buf, strlen(req_buf));
+        
+        // Wait for ACK (don't fail if SS fails - request is in memory)
+        char resp_buf[MAX_LINE];
+        recv_line(ss_fd, resp_buf, sizeof(resp_buf));
+        close(ss_fd);
+        log_info("nm_request_persisted", "id=%d file=%s", request_id, filename);
+    }
+    
     char msg[256];
     snprintf(msg, sizeof(msg), "Access request created with ID #%d", request_id);
     log_info("nm_access_request_created", "id=%d file=%s user=%s owner=%s type=%c",
@@ -1897,7 +1922,29 @@ int handle_approveaccessrequest(int client_fd, const char *username, const char 
         return send_error_response(client_fd, "", username, &err);
     }
     
-    log_info("nm_approve_step11", "SS success, removing request from queue");
+    log_info("nm_approve_step11", "SS success, removing request from queue and metadata");
+    
+    // Remove request from SS metadata
+    int ss_fd2 = get_ss_connection_for_file(entry);
+    if (ss_fd2 >= 0) {
+        char rm_payload[1024];
+        snprintf(rm_payload, sizeof(rm_payload), "%s|%d", full_path, request_id);
+        
+        Message rm_req = {0};
+        snprintf(rm_req.type, sizeof(rm_req.type), "REMOVE_REQUEST");
+        snprintf(rm_req.id, sizeof(rm_req.id), "1");
+        snprintf(rm_req.username, sizeof(rm_req.username), "%s", username);
+        snprintf(rm_req.role, sizeof(rm_req.role), "NM");
+        snprintf(rm_req.payload, sizeof(rm_req.payload), "%s", rm_payload);
+        
+        char rm_buf[MAX_LINE];
+        proto_format_line(&rm_req, rm_buf, sizeof(rm_buf));
+        send_all(ss_fd2, rm_buf, strlen(rm_buf));
+        
+        char rm_resp[MAX_LINE];
+        recv_line(ss_fd2, rm_resp, sizeof(rm_resp));
+        close(ss_fd2);
+    }
     
     // Success - remove request from queue
     request_queue_remove(request_id);
@@ -1935,6 +1982,46 @@ int handle_disapproveaccessrequest(int client_fd, const char *username, const ch
     if (strcmp(req->owner, username) != 0) {
         Error err = error_simple(ERR_UNAUTHORIZED, "You are not the owner of this file");
         return send_error_response(client_fd, "", username, &err);
+    }
+    
+    // Build full path to locate file
+    char full_path[768];
+    if (strcmp(req->folder_path, "/") == 0) {
+        snprintf(full_path, sizeof(full_path), "/%s", req->filename);
+    } else {
+        size_t folder_len = strlen(req->folder_path);
+        if (folder_len > 0 && req->folder_path[folder_len - 1] == '/') {
+            snprintf(full_path, sizeof(full_path), "%s%s", req->folder_path, req->filename);
+        } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", req->folder_path, req->filename);
+        }
+    }
+    
+    // Lookup file to get SS connection
+    FileEntry *entry = index_lookup_file(full_path);
+    
+    // Remove request from SS metadata (if file still exists)
+    if (entry) {
+        int ss_fd = get_ss_connection_for_file(entry);
+        if (ss_fd >= 0) {
+            char rm_payload[1024];
+            snprintf(rm_payload, sizeof(rm_payload), "%s|%d", full_path, request_id);
+            
+            Message rm_req = {0};
+            snprintf(rm_req.type, sizeof(rm_req.type), "REMOVE_REQUEST");
+            snprintf(rm_req.id, sizeof(rm_req.id), "1");
+            snprintf(rm_req.username, sizeof(rm_req.username), "%s", username);
+            snprintf(rm_req.role, sizeof(rm_req.role), "NM");
+            snprintf(rm_req.payload, sizeof(rm_req.payload), "%s", rm_payload);
+            
+            char rm_buf[MAX_LINE];
+            proto_format_line(&rm_req, rm_buf, sizeof(rm_buf));
+            send_all(ss_fd, rm_buf, strlen(rm_buf));
+            
+            char rm_resp[MAX_LINE];
+            recv_line(ss_fd, rm_resp, sizeof(rm_resp));
+            close(ss_fd);
+        }
     }
     
     // Remove request from queue

@@ -1126,6 +1126,162 @@ static void handle_command(Ctx *ctx, int client_fd, Message cmd_msg) {
                 log_error("ss_getmeta_failed", "file=%s", filename);
             }
         }
+        // Handle ADD_REQUEST command (from NM)
+        else if (strcmp(cmd_msg.type, "ADD_REQUEST") == 0) {
+            // Payload: filename|request_id|requester|access_type
+            char filename[256] = {0};
+            int request_id = 0;
+            char requester[64] = {0};
+            char access_type = 'R';
+            
+            char *saveptr = NULL;
+            char payload_copy[512];
+            strncpy(payload_copy, cmd_msg.payload, sizeof(payload_copy) - 1);
+            payload_copy[sizeof(payload_copy) - 1] = '\0';
+            
+            char *field = strtok_r(payload_copy, "|", &saveptr);
+            if (field) strncpy(filename, field, sizeof(filename) - 1);
+            field = strtok_r(NULL, "|", &saveptr);
+            if (field) request_id = atoi(field);
+            field = strtok_r(NULL, "|", &saveptr);
+            if (field) strncpy(requester, field, sizeof(requester) - 1);
+            field = strtok_r(NULL, "|", &saveptr);
+            if (field) access_type = field[0];
+            
+            log_info("ss_cmd_add_request", "file=%s id=%d requester=%s type=%c", 
+                     filename, request_id, requester, access_type);
+            
+            // Load metadata
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "NOT_FOUND", "File not found",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Add request to metadata
+            if (meta.pending_request_count < MAX_PENDING_REQUESTS) {
+                PendingRequest *req = &meta.pending_requests[meta.pending_request_count];
+                req->request_id = request_id;
+                size_t req_len = strlen(requester);
+                if (req_len >= sizeof(req->requester)) req_len = sizeof(req->requester) - 1;
+                memcpy(req->requester, requester, req_len);
+                req->requester[req_len] = '\0';
+                req->access_type = access_type;
+                req->timestamp = time(NULL);
+                meta.pending_request_count++;
+                
+                // Save metadata
+                if (metadata_save(ctx->storage_dir, filename, &meta) == 0) {
+                    Message ack = {0};
+                    snprintf(ack.type, sizeof(ack.type), "ACK");
+                    snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                    snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                    snprintf(ack.role, sizeof(ack.role), "SS");
+                    snprintf(ack.payload, sizeof(ack.payload), "Request added");
+                    char ack_line[MAX_LINE];
+                    proto_format_line(&ack, ack_line, sizeof(ack_line));
+                    send_all(client_fd, ack_line, strlen(ack_line));
+                    log_info("ss_request_added", "file=%s id=%d", filename, request_id);
+                } else {
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "INTERNAL", "Failed to save metadata",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                }
+            } else {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "LIMIT", "Too many pending requests",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+            }
+            close(client_fd);
+            return;
+        }
+        // Handle REMOVE_REQUEST command (from NM)
+        else if (strcmp(cmd_msg.type, "REMOVE_REQUEST") == 0) {
+            // Payload: filename|request_id
+            char filename[256] = {0};
+            int request_id = 0;
+            
+            char *pipe = strchr(cmd_msg.payload, '|');
+            if (pipe) {
+                size_t fname_len = pipe - cmd_msg.payload;
+                if (fname_len < sizeof(filename)) {
+                    memcpy(filename, cmd_msg.payload, fname_len);
+                    filename[fname_len] = '\0';
+                }
+                request_id = atoi(pipe + 1);
+            }
+            
+            log_info("ss_cmd_remove_request", "file=%s id=%d", filename, request_id);
+            
+            // Load metadata
+            FileMetadata meta;
+            if (metadata_load(ctx->storage_dir, filename, &meta) != 0) {
+                char error_buf[MAX_LINE];
+                proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                  "NOT_FOUND", "File not found",
+                                  error_buf, sizeof(error_buf));
+                send_all(client_fd, error_buf, strlen(error_buf));
+                close(client_fd);
+                return;
+            }
+            
+            // Find and remove request
+            int found = 0;
+            for (int i = 0; i < meta.pending_request_count; i++) {
+                if (meta.pending_requests[i].request_id == request_id) {
+                    // Shift remaining requests
+                    for (int j = i; j < meta.pending_request_count - 1; j++) {
+                        meta.pending_requests[j] = meta.pending_requests[j + 1];
+                    }
+                    meta.pending_request_count--;
+                    found = 1;
+                    break;
+                }
+            }
+            
+            if (found) {
+                // Save metadata
+                if (metadata_save(ctx->storage_dir, filename, &meta) == 0) {
+                    Message ack = {0};
+                    snprintf(ack.type, sizeof(ack.type), "ACK");
+                    snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                    snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                    snprintf(ack.role, sizeof(ack.role), "SS");
+                    snprintf(ack.payload, sizeof(ack.payload), "Request removed");
+                    char ack_line[MAX_LINE];
+                    proto_format_line(&ack, ack_line, sizeof(ack_line));
+                    send_all(client_fd, ack_line, strlen(ack_line));
+                    log_info("ss_request_removed", "file=%s id=%d", filename, request_id);
+                } else {
+                    char error_buf[MAX_LINE];
+                    proto_format_error(cmd_msg.id, cmd_msg.username, "SS",
+                                      "INTERNAL", "Failed to save metadata",
+                                      error_buf, sizeof(error_buf));
+                    send_all(client_fd, error_buf, strlen(error_buf));
+                }
+            } else {
+                Message ack = {0};
+                snprintf(ack.type, sizeof(ack.type), "ACK");
+                snprintf(ack.id, sizeof(ack.id), "%s", cmd_msg.id);
+                snprintf(ack.username, sizeof(ack.username), "%s", cmd_msg.username);
+                snprintf(ack.role, sizeof(ack.role), "SS");
+                snprintf(ack.payload, sizeof(ack.payload), "Request not found (already removed)");
+                char ack_line[MAX_LINE];
+                proto_format_line(&ack, ack_line, sizeof(ack_line));
+                send_all(client_fd, ack_line, strlen(ack_line));
+            }
+            close(client_fd);
+            return;
+        }
         // Unknown command
         else {
             log_error("ss_unknown_cmd", "type=%s", cmd_msg.type);
