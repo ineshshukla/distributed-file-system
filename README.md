@@ -1,71 +1,159 @@
-# LangOS Docs++ Prototype
+# Distributed File System
 
-This repository contains our implementation of the OSN course project: a simplified distributed document system with a Name Server (NM), multiple Storage Servers (SS), and CLI clients.
+This repository contains a **C-based Distributed File System (DFS)** that implements core concepts used in real-world distributed storage systems such as centralized metadata management, decentralized data storage, replication, heartbeat-based failure detection, and client–server coordination.
 
-## Prerequisites
+The goal of this project is to build a distributed system **from scratch**, focusing on low-level systems programming, networking, concurrency, and fault tolerance, without relying on existing DFS frameworks.
 
-- GCC/Clang with POSIX threads support
-- GNU Make
-- Linux environment (tested on WSL2 + Ubuntu)
+---
 
-## Building
+## Overview
 
-```bash
-make clean && make
+The system follows a classic distributed file system architecture consisting of:
+
+- A **Name Server (NM)** responsible for metadata and coordination
+- Multiple **Storage Servers (SS)** responsible for storing file data
+- A **Client** that interacts with the system via an interactive command-line interface
+
+The Name Server manages the global namespace and keeps track of live storage servers, while clients communicate directly with storage servers for actual data transfer after resolving metadata through the Name Server.
+
+---
+
+## Key Features
+
+### Centralized Metadata Management
+- The Name Server maintains the global file namespace
+- Tracks which storage servers hold replicas of each file
+- Resolves client requests by returning storage server locations
+- Acts as the coordination point for replication and fault handling
+
+### Distributed Storage Servers
+- Multiple independent storage servers store files locally
+- Each server registers itself with the Name Server at startup
+- Handles client read and write requests directly
+- Designed to simulate real distributed storage nodes
+
+### Replication and Fault Tolerance
+- Supports write replication across multiple storage servers
+- Ensures data availability even if a storage server fails
+- Metadata is updated dynamically when failures are detected
+- Replication behavior is documented and configurable
+
+### Heartbeat-Based Failure Detection
+- Storage servers periodically send heartbeats to the Name Server
+- The Name Server detects failed nodes using heartbeat timeouts
+- Enables safe redirection of clients away from failed servers
+
+### Interactive Client
+- Command-line client for interacting with the distributed file system
+- Client first contacts the Name Server for metadata
+- Data transfer happens directly between the client and storage servers
+- Mimics the interaction model of production-grade DFS clients
+
+### Low-Level Systems Implementation
+- Implemented entirely in C
+- Uses POSIX sockets for networking
+- Multi-threaded design using POSIX threads
+- Explicit message formats and protocol handling
+- No external distributed systems libraries or frameworks
+
+---
+
+## Architecture
+
+```
+            +---------------+        +---------------+
+            | StorageServer |        | StorageServer |
+            |     (SS1)     |        |     (SS2)     |
+            +-------+-------+        +-------+-------+
+                    \                     /
+                     \  Registration /   /
+                      \  Heartbeats     /
+                       v               v
+                    +----------------------+
+                    |     Name Server      |
+                    | (Metadata, Control,  |
+                    |  Coordination)       |
+                    +----------+-----------+
+                               ^
+                               |
+                  Client Requests / Metadata Resolution
+                               |
+                    +----------------------+
+                    |        Client        |
+                    +----------------------+
+
+        -------- Direct Client ↔ Storage Server Data Transfer --------
+        (Performed only after the Name Server provides SS details)
+
 ```
 
-This produces:
+---
 
-- `bin_nm` – Name Server
-- `bin_ss` – Storage Server
-- `bin_client` – Interactive client
+## Repository Structure
 
-## Running
+```
 
-In separate terminals:
+.
+├── src/                 # Source code for Name Server, Storage Server, and Client
+├── include/             # Header files
+├── scripts/             # Helper scripts to start/stop components
+├── docs/                # Design and implementation documentation
+│   ├── requirements.md
+│   ├── design_choices.md
+│   ├── HEARTBEAT_MONITORING.md
+│   ├── WRITE_REPLICATION.md
+│   └── REPLICATION_WORKING.md
+├── Makefile
+└── README.md
 
-1. **Name Server**
-   ```bash
-   ./bin_nm --host 127.0.0.1 --port 5000
-   ```
+````
 
-2. **Storage Server(s)**
-   ```bash
-   ./bin_ss \
-     --nm-host 127.0.0.1 --nm-port 5000 \
-     --host 127.0.0.1 --client-port 6001 \
-     --storage ./storage_ss1 --username ss1
-   ```
-   (You can start additional SS instances by providing distinct `--client-port`, `--storage`, and usernames.)
+---
 
-3. **Client**
-   ```bash
-   ./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username alice
-   ```
+## Setup and Build Instructions
 
-   Run `./bin_client --help` to see the available interactive commands (VIEW, READ, WRITE, STREAM, ACL management, checkpoints, folders, etc.).
+### Prerequisites
+- Linux-based environment (tested on Linux / WSL)
+- GCC compiler
+- Make
 
-Sample automation scripts are included:
+### Build
+```bash
+make clean
+make
+````
 
-- `./run_all.sh` – Starts NM + two SS instances + a client (adjust as needed).
-- `./stop_all.sh` – Attempts to stop background processes started by the helper script.
+This will generate the following binaries:
 
-## Documentation
+* `bin_nm` – Name Server
+* `bin_ss` – Storage Server
+* `bin_client` – Client
 
-- `requirements.md` – Project specification from the course staff
-- `context.md` – High-level architecture & implementation plan
-- `design_choices.md` – Summary of open-ended design decisions (threading model, sentence locking, ACL caching, etc.)
+---
 
-## Logs & Storage
+## Running the System
 
-- NM & SS emit JSON-line logs (`nm.log`, `ss.log`, etc.) in the repo root.
-- Each storage server persists files under `storage_ssX/files` and metadata under `storage_ssX/metadata`.
-- Client usernames are persisted in `registry_clients.txt` so LIST survives NM restarts.
+Each component should be run in a separate terminal.
 
-## Testing Notes
+### Start the Name Server
 
-- `make` builds all binaries with `-Wall -Wextra -Werror`.
-- WRITE and STREAM commands have been exercised with concurrent clients; refer to `context.md` and log files for manual test traces.
+```bash
+./bin_nm --host 127.0.0.1 --port 5000
+```
 
-Feel free to reach out if you need additional runbooks or automated tests. Happy hacking!
+### Start a Storage Server
+
+```bash
+./bin_ss --nm-host 127.0.0.1 --nm-port 5000 --port 6000 --username ss1
+```
+
+Multiple storage servers can be started by changing the port and username.
+
+### Start the Client
+
+```bash
+./bin_client --nm-host 127.0.0.1 --nm-port 5000 --username client1
+```
+
+Once started, the client provides an interactive interface for file system operations.
 
